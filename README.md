@@ -122,3 +122,17 @@ Use `session_start` with a stable mutation ID. A new client can call
 `session_lookup` with the project and mutation ID, or `session_status` with
 the returned session ID. SDK-based tests exercise the actual HTTPS edge and
 broker using generated certificates and a deterministic identity fixture.
+
+### Embedded worker runtime
+
+WorkerHost uses the public Multisession Common, Storage.Sqlite and native lease
+packages at version `0.2.0-alpha.10`. Linux targets `net11.0`. Native Windows
+targets `net11.0-windows`. To initialize the credential-free runtime, set
+`Worker__Runtime=deterministic`, `Worker__StateDirectory` to an absolute path
+beneath an existing writable parent directory, and `Worker__TrustScope` to a
+stable nonempty UUID. Keep the state directory and trust scope together across
+restarts. The runtime creates the directory on its initial start and opens the
+existing native-lease-protected store thereafter.
+
+The current WorkerHost starts the embedded runtime and exposes liveness.
+Broker polling and dispatch remain tracked in the coordination plan.

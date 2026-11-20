@@ -1,6 +1,6 @@
 # Tasks: Embedded runtime and verified results
 
-- [ ] T201 Restore public runtime packages for Linux and native Windows targets.
+- [x] T201 Restore public runtime packages for Linux and native Windows targets.
 - [ ] T202 Compose SessionRuntime with native lease, SQLite storage and registered
   runtime bindings. Verify recovery with two deterministic registrations.
 - [ ] T203 Verify result evidence and artifact bytes and persist immutable manifests.

@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <TargetFramework Condition="$([MSBuild]::IsOSPlatform('Windows'))">net11.0-windows</TargetFramework>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
@@ -9,6 +10,7 @@
     <ProjectReference Include="../../src/Monstertacle.Hosting.Contracts/Monstertacle.Hosting.Contracts.csproj" />
     <ProjectReference Include="../../src/Monstertacle.Hosting.ControlPlane/Monstertacle.Hosting.ControlPlane.csproj" />
     <ProjectReference Include="../../src/Monstertacle.Hosting.McpHost/Monstertacle.Hosting.McpHost.csproj" />
+    <ProjectReference Include="../../src/Monstertacle.Hosting.WorkerHost/Monstertacle.Hosting.WorkerHost.csproj" />
     <Using Include="Xunit" />
   </ItemGroup>
 </Project>
