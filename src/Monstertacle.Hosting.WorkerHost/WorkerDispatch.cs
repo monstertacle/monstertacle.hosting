@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Monstertacle.Hosting.Contracts;
 using Monstertacle.Multisession;
 using Monstertacle.Multisession.Contracts;
@@ -30,7 +32,8 @@ internal sealed class WorkerDispatch(
             {
                 if (current.State != "cancelled")
                 {
-                    await broker.ReportAsync(claim, new("cancelled", "not-started"), token);
+                    await broker.CompleteAsync(claim,
+                        new(ResultContract.Version, claim.SessionId, claim.JobId, new("cancelled", "not-started"), []), token);
                 }
 
                 ledger.Advance(mutation);
@@ -88,12 +91,27 @@ internal sealed class WorkerDispatch(
         }
 
         var evidence = ToEvidence(request, unsupported);
-        await broker.ReportAsync(claim, evidence, token);
-
         if (request.State != RequestState.Running && request.Certainty != ExecutionCertainty.Unknown)
         {
+            await broker.CompleteAsync(claim, CreateCompletion(claim, evidence, request.Result), token);
             ledger.Advance(mutation);
         }
+        else
+        {
+            await broker.ReportAsync(claim, evidence, token);
+        }
+    }
+
+    private static JobCompletion CreateCompletion(JobClaim claim, JobObservation evidence, ProviderReply? result)
+    {
+        ArtifactUpload[] artifacts = [];
+        if (evidence.Certainty == "confirmed-ended" && result is { Output.Length: > 0 } captured)
+        {
+            var bytes = Encoding.UTF8.GetBytes(captured.Output);
+            artifacts = [new("output", bytes.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes)];
+        }
+
+        return new(ResultContract.Version, claim.SessionId, claim.JobId, evidence, artifacts);
     }
 
     private static void ValidateClaim(JobClaim expected, JobClaim actual)

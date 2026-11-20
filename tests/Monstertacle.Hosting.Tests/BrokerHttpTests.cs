@@ -5,6 +5,7 @@ using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -306,7 +307,7 @@ public sealed class BrokerHttpTests
             }
         }
 
-        using var resumed = fixture.ConnectWorker("primary", handler => new LoseResponse(handler, "/observation"));
+        using var resumed = fixture.ConnectWorker("primary", handler => new LoseResponse(handler, "/result"));
         await using var reopened = await WorkerRuntime.OpenAsync(directory, trust, [binding.Provider], [binding.Profile], ct);
         var recoveredLedger = new WorkerLedger(directory);
         Assert.Equal(fence, recoveredLedger.Read().Claim?.Fence);
@@ -343,6 +344,31 @@ public sealed class BrokerHttpTests
         Assert.Equal("fixture output", receipt.Result?.Output);
         Assert.Equal(2, chat.Calls);
         Assert.Null(requests.NextCursor);
+
+        var evidence = new JobObservation("succeeded", "confirmed-ended");
+        var upload = Output("fixture output");
+        var completion = new JobCompletion(ResultContract.Version, admitted.SessionId, primary.JobId, evidence, [upload]);
+        var resultUrl = $"{WorkerContract.Route}/jobs/{primary.JobId}/claims/{fence}/result";
+        using var replay = await resumed.PostAsJsonAsync(resultUrl, completion, ct);
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        var verified = await replay.Content.ReadFromJsonAsync<VerifiedJobResult>(ct);
+        Assert.Equal(upload.Sha256, Assert.Single(verified!.Manifest.Artifacts).Sha256);
+        Assert.Equal(64, verified.Sha256.Length);
+
+        using var tampered = await resumed.PostAsJsonAsync(resultUrl,
+            completion with { Artifacts = [upload with { Sha256 = new string('0', 64) }] }, ct);
+        Assert.Equal(HttpStatusCode.BadRequest, tampered.StatusCode);
+        using var changed = await resumed.PostAsJsonAsync(resultUrl,
+            completion with { Artifacts = [Output("different output")] }, ct);
+        Assert.Equal(HttpStatusCode.Conflict, changed.StatusCode);
+        using var wrongLane = await secondaryClient.PostAsJsonAsync(resultUrl, completion, ct);
+        Assert.Equal(HttpStatusCode.NotFound, wrongLane.StatusCode);
+    }
+
+    private static ArtifactUpload Output(string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        return new("output", bytes.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes);
     }
 
     private sealed class FixtureChatClient : IChatClient

@@ -117,6 +117,16 @@ public static class BrokerApplication
                 };
             });
 
+        workers.MapPost("/jobs/{jobId:guid}/claims/{fence:guid}/result", (Guid jobId, Guid fence,
+            JobCompletion completion, HttpContext context, SessionStore store) =>
+            store.Complete(CurrentWorker(context), jobId, fence, completion) switch
+            {
+                { Outcome: SessionStore.ResultOutcome.Accepted, Result: var result } => Results.Ok(result),
+                { Outcome: SessionStore.ResultOutcome.Invalid } => Results.BadRequest(),
+                { Outcome: SessionStore.ResultOutcome.Conflict } => Results.Conflict(),
+                _ => Results.NotFound()
+            });
+
         return app;
     }
 

@@ -194,30 +194,44 @@ internal sealed partial class SessionStore
             return ObservationOutcome.Missing;
         }
 
-        if (job.Claim.State == observation.State && job.Certainty == observation.Certainty &&
-            job.CancellationUnsupported == observation.CancellationUnsupported)
+        if (HasSameEvidence(job, observation))
         {
             return ObservationOutcome.Accepted;
         }
 
-        var refinesUncertainty = job.Certainty == "unknown" && observation.Certainty == "confirmed-ended" &&
-            job.Claim.State == observation.State;
-        if ((job.Claim.State is not ("dispatch-authorized" or "running") && !refinesUncertainty) ||
-            (job.Claim.State == "running" && observation.Certainty == "not-started") ||
-            (observation.CancellationUnsupported && !job.Claim.CancellationRequested) ||
-            (job.CancellationUnsupported && !observation.CancellationUnsupported))
+        if (!CanRecordEvidence(job, observation))
         {
             return ObservationOutcome.Conflict;
         }
 
+        UpdateEvidence(connection, transaction, jobId, observation);
+        transaction.Commit();
+        return ObservationOutcome.Accepted;
+    }
+
+    private static bool HasSameEvidence(WorkerJob job, JobObservation observation) =>
+        job.Claim.State == observation.State && job.Certainty == observation.Certainty &&
+        job.CancellationUnsupported == observation.CancellationUnsupported;
+
+    private static bool CanRecordEvidence(WorkerJob job, JobObservation observation)
+    {
+        var refinesUncertainty = job.Certainty == "unknown" && observation.Certainty == "confirmed-ended" &&
+            job.Claim.State == observation.State;
+        return (job.Claim.State is "dispatch-authorized" or "running" || refinesUncertainty) &&
+            (job.Claim.State != "running" || observation.Certainty != "not-started") &&
+            (!observation.CancellationUnsupported || job.Claim.CancellationRequested) &&
+            (!job.CancellationUnsupported || observation.CancellationUnsupported);
+    }
+
+    private static void UpdateEvidence(SqliteConnection connection, SqliteTransaction transaction, Guid jobId,
+        JobObservation observation)
+    {
         using var update = Command(connection, transaction, """
             UPDATE jobs SET state = $state, execution_certainty = $certainty, cancel_unsupported = $unsupported
             WHERE id = $id;
             """, ("$state", observation.State), ("$certainty", observation.Certainty),
             ("$unsupported", observation.CancellationUnsupported), ("$id", jobId.ToString("D")));
         update.ExecuteNonQuery();
-        transaction.Commit();
-        return ObservationOutcome.Accepted;
     }
 
     private sealed record WorkerJob(JobClaim Claim, string Project, string Task, string Principal,

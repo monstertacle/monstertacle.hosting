@@ -31,6 +31,12 @@ internal sealed class WorkerBrokerClient(HttpClient client)
         response.EnsureSuccessStatusCode();
     }
 
+    public async Task CompleteAsync(JobClaim claim, JobCompletion completion, CancellationToken token)
+    {
+        using var response = await client.PostAsJsonAsync(PathFor(claim) + "/result", completion, token);
+        response.EnsureSuccessStatusCode();
+    }
+
     private static string PathFor(JobClaim claim) =>
         $"{WorkerContract.Route}/jobs/{claim.JobId:D}/claims/{claim.Fence:D}";
 

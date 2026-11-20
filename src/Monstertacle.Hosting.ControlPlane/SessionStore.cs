@@ -46,6 +46,7 @@ internal sealed partial class SessionStore
         var schemaVersion = (long)version.ExecuteScalar()!;
         switch (schemaVersion)
         {
+            case 4L:
             case 3L:
             case 2L:
             case 1L:
@@ -111,6 +112,27 @@ internal sealed partial class SessionStore
                 ALTER TABLE jobs ADD COLUMN execution_certainty TEXT;
                 ALTER TABLE jobs ADD COLUMN cancel_unsupported INTEGER NOT NULL DEFAULT 0;
                 PRAGMA user_version = 3;
+                """);
+            upgrade.ExecuteNonQuery();
+        }
+
+        if (schemaVersion < 4L)
+        {
+            using var upgrade = Command(connection, transaction, """
+                CREATE TABLE job_results (
+                    job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+                    digest TEXT NOT NULL,
+                    manifest TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE job_artifacts (
+                    job_id TEXT NOT NULL REFERENCES job_results(job_id),
+                    name TEXT NOT NULL,
+                    bytes INTEGER NOT NULL,
+                    digest TEXT NOT NULL,
+                    content BLOB NOT NULL,
+                    PRIMARY KEY (job_id, name)
+                ) STRICT;
+                PRAGMA user_version = 4;
                 """);
             upgrade.ExecuteNonQuery();
         }

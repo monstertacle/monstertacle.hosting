@@ -1,3 +1,4 @@
+using Monstertacle.Hosting.Contracts;
 using Monstertacle.Multisession;
 using Monstertacle.Multisession.Contracts;
 using Monstertacle.Multisession.Storage.Sqlite;
@@ -37,7 +38,8 @@ internal static class WorkerRuntime
                 StateDirectory = lease.StateDirectory,
                 Retention = new(true, null),
                 MaxConcurrentRequests = 1,
-                MaxQueuedRequests = 8
+                MaxQueuedRequests = 8,
+                MaxOutputBytes = ResultContract.MaxTotalArtifactBytes
             };
             store = exists
                 ? await SqliteStoreFactory.OpenExistingAsync(lease, trustScope, options, cancellationToken)
