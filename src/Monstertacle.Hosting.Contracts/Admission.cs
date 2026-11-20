@@ -68,3 +68,5 @@ public sealed record SessionStatus(
     IReadOnlyList<JobStatus> Jobs);
 
 public sealed record JobStatus(Guid JobId, string Lane, string State);
+
+public sealed record SessionPage(IReadOnlyList<SessionStatus> Sessions, Guid? NextAfter);

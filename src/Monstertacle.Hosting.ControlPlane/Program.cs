@@ -1,6 +1,4 @@
-var builder = WebApplication.CreateBuilder(args);
-var app = builder.Build();
+using Monstertacle.Hosting.ControlPlane;
 
-app.MapGet("/health/live", () => Results.NoContent());
-
+var app = BrokerApplication.Build(WebApplication.CreateBuilder(args));
 app.Run();

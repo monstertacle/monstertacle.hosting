@@ -27,3 +27,49 @@ dotnet test --no-build -c Release
 The initial solution includes the three host entry points and version 1
 admission contract. The current contract tests exercise input limits and repeatable
 payload digests. Service admission and reconnect are tracked in the feature plans.
+
+## Private broker API
+
+The control plane uses SQLite on a persistent local volume. Set
+`Broker__DatabaseFile` to a writable database path with an existing parent
+directory. Configure a Kestrel HTTPS endpoint and server certificate. The
+private endpoint requires the edge client's TLS certificate, pinned by
+`Broker__Authentication__EdgeCertificateSha256`, and a bearer access token.
+Set `Broker__Authentication__Issuer`, `Broker__Authentication__Audience`, and
+`Broker__Authentication__Scope`. The issuer serves HTTPS OpenID Connect
+metadata and signing keys. The API requires a single exact audience.
+
+Set `Broker__PolicyFile` to an operator-managed JSON file. Replace the file
+atomically when changing grants. Each request reads and validates the current
+file. This example grants two identities access to the same project, with
+independent session ownership.
+
+```json
+{
+  "version": 1,
+  "projects": [{ "id": "demo", "lanes": ["primary"] }],
+  "people": [
+    {
+      "id": "first",
+      "identities": [{ "issuer": "https://identity.example", "subject": "first-subject" }],
+      "grants": [{ "project": "demo", "lane": "primary", "actions": ["start", "read"] }]
+    },
+    {
+      "id": "second",
+      "identities": [{ "issuer": "https://identity.example", "subject": "second-subject" }],
+      "grants": [{ "project": "demo", "lane": "primary", "actions": ["start", "read"] }]
+    }
+  ]
+}
+```
+
+- `POST /v1/sessions` accepts `mutationId`, `project`, and `task`. It returns
+  201 for admission, 200 for an authorized identical retry, and 409 for
+  authorized UUID reuse with a changed task.
+- `GET /v1/sessions/{sessionId}` reads the current session and child identities.
+- `GET /v1/sessions/by-mutation/{project}/{mutationId}` recovers a lost response.
+- `GET /v1/sessions?project=demo&limit=20` lists authorized sessions. Pass the
+  returned `nextAfter` as `after` to continue.
+
+The broker currently persists jobs in the queued state. Worker dispatch and MCP
+integration remain tracked in the feature plans.
