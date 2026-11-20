@@ -405,7 +405,7 @@ public sealed class BrokerHttpTests
             try
             {
                 // Schannel needs the client private key to be accessible through the Windows key store.
-                return X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.UserKeySet);
+                return X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.Exportable);
             }
             finally
             {
