@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="11.0.0" />
+    <InternalsVisibleTo Include="Monstertacle.Hosting.ControlPlane" />
+    <InternalsVisibleTo Include="Monstertacle.Hosting.McpHost" />
+    <InternalsVisibleTo Include="Monstertacle.Hosting.Tests" />
+    <Using Include="Microsoft.Extensions.Configuration" />
+    <Using Include="Microsoft.Extensions.DependencyInjection" />
+  </ItemGroup>
+</Project>

@@ -1,7 +1,7 @@
+using Monstertacle.Hosting.Security;
 using Microsoft.Data.Sqlite;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Monstertacle.Hosting.Contracts;
-using Access = Monstertacle.Hosting.ControlPlane.BrokerPolicy.Access;
+using Access = Monstertacle.Hosting.Security.BrokerPolicy.Access;
 using Worker = Monstertacle.Hosting.ControlPlane.WorkerRegistrations.WorkerIdentity;
 
 namespace Monstertacle.Hosting.ControlPlane;
@@ -12,8 +12,7 @@ public static class BrokerApplication
     {
         var authentication = new BrokerAuthentication(builder.Configuration);
         authentication.Configure(builder);
-        builder.Services.TryAddSingleton(TimeProvider.System);
-        builder.Services.AddSingleton<BrokerPolicy>();
+        builder.Services.AddSingleton(new BrokerPolicy(builder.Configuration.GetSection("Broker")));
         builder.Services.AddSingleton<SessionStore>();
 
         var app = builder.Build();

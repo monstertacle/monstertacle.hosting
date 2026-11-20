@@ -2,7 +2,7 @@ using System.Security.Claims;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Monstertacle.Hosting.ControlPlane;
+namespace Monstertacle.Hosting.Security;
 
 internal sealed class BrokerPolicy(IConfiguration configuration)
 {
@@ -14,7 +14,7 @@ internal sealed class BrokerPolicy(IConfiguration configuration)
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
 
-    private readonly string? path = configuration["Broker:PolicyFile"];
+    private readonly string? path = configuration["PolicyFile"];
 
     public Access? Resolve(ClaimsPrincipal user)
     {

@@ -8,6 +8,7 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
     <ProjectReference Include="../../src/Monstertacle.Hosting.Contracts/Monstertacle.Hosting.Contracts.csproj" />
     <ProjectReference Include="../../src/Monstertacle.Hosting.ControlPlane/Monstertacle.Hosting.ControlPlane.csproj" />
+    <ProjectReference Include="../../src/Monstertacle.Hosting.McpHost/Monstertacle.Hosting.McpHost.csproj" />
     <Using Include="Xunit" />
   </ItemGroup>
 </Project>

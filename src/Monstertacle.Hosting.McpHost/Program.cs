@@ -1,6 +1,4 @@
-var builder = WebApplication.CreateBuilder(args);
-var app = builder.Build();
+using Monstertacle.Hosting.McpHost;
 
-app.MapGet("/health/live", () => Results.NoContent());
-
+var app = McpApplication.Build(WebApplication.CreateBuilder(args));
 app.Run();

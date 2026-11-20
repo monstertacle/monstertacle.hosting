@@ -1,0 +1,3 @@
+[submodule "dependencies/communication"]
+	path = dependencies/communication
+	url = https://github.com/monstertacle/monstertacle.communication.git

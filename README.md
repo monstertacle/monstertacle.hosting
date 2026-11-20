@@ -16,9 +16,10 @@ C#, and shell or PowerShell. See the [constitution](.specify/memory/constitution
 
 ## Build and test
 
-Install the .NET 11 SDK specified in `global.json`, then run:
+Install the .NET 11 SDK specified in `global.json`. From a fresh checkout run:
 
 ```sh
+git submodule update --init --recursive
 dotnet restore
 dotnet build --no-restore -c Release
 dotnet test --no-build -c Release
@@ -75,8 +76,8 @@ independent session ownership.
 - `GET /v1/sessions?project=demo&limit=20` lists authorized sessions. Pass the
   returned `nextAfter` as `after` to continue.
 
-The broker initially persists jobs in the queued state. Runtime dispatch and MCP
-integration remain tracked in the feature plans.
+The broker initially persists jobs in the queued state. Runtime dispatch
+remains tracked in the feature plans.
 
 ### Worker claims and cancellation
 
@@ -101,3 +102,23 @@ together across restarts.
   its state with cancellation intent until runtime evidence arrives.
 
 Each project admits up to 256 sessions with pending or authorized work.
+
+## MCP Streamable HTTP
+
+The MCP host consumes the .NET 11 target of the MIT-licensed Communication
+adapter at the public revision pinned in `dependencies/communication`. Its
+license is in the submodule. CI initializes the pinned source recursively.
+
+Serve the edge on HTTPS. Configure `Mcp__Authentication__Issuer`,
+`Mcp__Authentication__Audience`, and `Mcp__Authentication__Scope` to match the
+broker. The audience is the public HTTPS URL ending in `/mcp`. Clients discover
+the authorization server at `/.well-known/oauth-protected-resource/mcp`.
+Configure `Mcp__PolicyFile`, `Mcp__BrokerUrl` (a private HTTPS origin),
+`Mcp__BrokerClientCertificateFile`, and, when needed,
+`Mcp__BrokerClientCertificatePassword`. Provision trust for the broker server
+certificate on the edge. Configure the broker to pin the edge client certificate.
+
+Use `session_start` with a stable mutation ID. A new client can call
+`session_lookup` with the project and mutation ID, or `session_status` with
+the returned session ID. SDK-based tests exercise the actual HTTPS edge and
+broker using generated certificates and a deterministic identity fixture.

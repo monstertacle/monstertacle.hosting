@@ -1,31 +1,21 @@
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
-using Microsoft.IdentityModel.Tokens;
+using Monstertacle.Hosting.Security;
 
 namespace Monstertacle.Hosting.ControlPlane;
 
-public sealed class BrokerAuthentication
+internal sealed class BrokerAuthentication
 {
-    private readonly string issuer;
-    private readonly string audience;
-    private readonly string scope;
+    private readonly UserTokenSettings tokens;
     private readonly byte[] edgeCertificateHash;
     private readonly WorkerRegistrations workers;
 
     public BrokerAuthentication(IConfiguration configuration)
     {
         var settings = configuration.GetSection("Broker:Authentication");
-        issuer = RequireHttps(settings, "Issuer");
-        audience = RequireHttps(settings, "Audience");
-        scope = settings["Scope"] ?? "";
-        if (scope.Length == 0 || scope.Any(char.IsWhiteSpace))
-        {
-            throw new InvalidOperationException("The broker requires one OAuth scope.");
-        }
-
+        tokens = new UserTokenSettings(settings);
         var fingerprint = settings["EdgeCertificateSha256"] ?? "";
         if (fingerprint.Length != 64 || !fingerprint.All(Uri.IsHexDigit))
         {
@@ -50,67 +40,13 @@ public sealed class BrokerAuthentication
             });
         });
 
-        builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(options =>
-        {
-            options.Authority = issuer;
-            options.RequireHttpsMetadata = true;
-            options.BackchannelHttpHandler ??= new HttpClientHandler { AllowAutoRedirect = false };
-            options.BackchannelTimeout = TimeSpan.FromSeconds(10);
-            options.MapInboundClaims = false;
-            options.IncludeErrorDetails = false;
-            options.SaveToken = false;
-
-            var validation = options.TokenValidationParameters;
-            validation.ValidateIssuer = true;
-            validation.ValidIssuer = issuer;
-            validation.IssuerValidator = (value, _, _) =>
-                string.Equals(value, issuer, StringComparison.Ordinal)
-                    ? value
-                    : throw new SecurityTokenInvalidIssuerException();
-            validation.ValidateAudience = true;
-            validation.ValidAudience = audience;
-            validation.IgnoreTrailingSlashWhenValidatingAudience = false;
-            validation.AudienceValidator = (values, _, _) =>
-                values?.Take(2).ToArray() is [var value] && string.Equals(value, audience, StringComparison.Ordinal);
-            validation.ValidateLifetime = true;
-            validation.RequireExpirationTime = true;
-            validation.ClockSkew = TimeSpan.Zero;
-            validation.RequireSignedTokens = true;
-            validation.ValidateIssuerSigningKey = true;
-            validation.AlgorithmValidator = IssuerDiscovery.AcceptsAlgorithm;
-
-            options.Events = new JwtBearerEvents
-            {
-                OnAuthenticationFailed = context =>
-                {
-                    context.Fail("The access token could not be verified.");
-                    return Task.CompletedTask;
-                },
-                OnTokenValidated = context =>
-                {
-                    var subject = context.Principal?.FindAll("sub").Take(2).ToArray();
-                    var scopes = context.Principal?.FindAll("scope").Concat(context.Principal.FindAll("scp"));
-                    if (subject is not [{ Value: var name }] || string.IsNullOrWhiteSpace(name) ||
-                        scopes?.SelectMany(claim => claim.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                            .Contains(scope, StringComparer.Ordinal) != true)
-                    {
-                        context.Fail("The token requires a subject and the configured scope.");
-                    }
-
-                    return Task.CompletedTask;
-                }
-            };
-        });
-        builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
-            .PostConfigure<TimeProvider>((options, time) =>
-                options.ConfigurationManager = new IssuerDiscovery(issuer, options.Backchannel, time));
-        builder.Services.AddAuthorization();
+        tokens.Configure(builder.Services);
     }
 
     public bool IsEdgeRequest(HttpContext context) =>
         context.Request.IsHttps && IsEdgeCertificate(context.Connection.ClientCertificate);
 
-    internal WorkerRegistrations.WorkerIdentity? Worker(HttpContext context) =>
+    public WorkerRegistrations.WorkerIdentity? Worker(HttpContext context) =>
         context.Request.IsHttps ? workers.Resolve(context.Connection.ClientCertificate) : null;
 
     private bool IsEdgeCertificate(X509Certificate2? certificate) =>
@@ -118,16 +54,4 @@ public sealed class BrokerAuthentication
         DateTime.UtcNow >= certificate.NotBefore.ToUniversalTime() &&
         DateTime.UtcNow <= certificate.NotAfter.ToUniversalTime() &&
         CryptographicOperations.FixedTimeEquals(certificate.GetCertHash(HashAlgorithmName.SHA256), edgeCertificateHash);
-
-    private static string RequireHttps(IConfiguration settings, string key)
-    {
-        var value = settings[key];
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||
-            uri.UserInfo.Length != 0 || uri.Fragment.Length != 0 || (key == "Issuer" && uri.Query.Length != 0))
-        {
-            throw new InvalidOperationException($"Broker authentication requires an HTTPS {key} URI.");
-        }
-
-        return value!;
-    }
 }

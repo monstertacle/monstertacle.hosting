@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="11.0.0" />
+    <ProjectReference Include="../Monstertacle.Hosting.Security/Monstertacle.Hosting.Security.csproj" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
     <ProjectReference Include="../Monstertacle.Hosting.Contracts/Monstertacle.Hosting.Contracts.csproj" />
     <InternalsVisibleTo Include="Monstertacle.Hosting.Tests" />

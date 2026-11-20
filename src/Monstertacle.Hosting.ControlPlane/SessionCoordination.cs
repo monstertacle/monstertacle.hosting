@@ -1,7 +1,8 @@
+using Monstertacle.Hosting.Security;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Monstertacle.Hosting.Contracts;
-using Access = Monstertacle.Hosting.ControlPlane.BrokerPolicy.Access;
+using Access = Monstertacle.Hosting.Security.BrokerPolicy.Access;
 using Worker = Monstertacle.Hosting.ControlPlane.WorkerRegistrations.WorkerIdentity;
 
 namespace Monstertacle.Hosting.ControlPlane;

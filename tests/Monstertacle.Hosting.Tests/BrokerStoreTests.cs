@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Monstertacle.Hosting.Contracts;
 using Monstertacle.Hosting.ControlPlane;
-using static Monstertacle.Hosting.ControlPlane.BrokerPolicy;
+using static Monstertacle.Hosting.Security.BrokerPolicy;
 
 namespace Monstertacle.Hosting.Tests;
 

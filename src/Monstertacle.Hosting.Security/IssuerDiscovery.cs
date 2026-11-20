@@ -2,7 +2,7 @@ using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
 
-namespace Monstertacle.Hosting.ControlPlane;
+namespace Monstertacle.Hosting.Security;
 
 internal sealed class IssuerDiscovery(string issuer, HttpClient backchannel, TimeProvider time)
     : IConfigurationManager<OpenIdConnectConfiguration>

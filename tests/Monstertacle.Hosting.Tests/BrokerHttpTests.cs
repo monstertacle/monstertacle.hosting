@@ -10,10 +10,13 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
+using ModelContextProtocol.Client;
 using Monstertacle.Hosting.Contracts;
 using Monstertacle.Hosting.ControlPlane;
+using Monstertacle.Hosting.McpHost;
 
 namespace Monstertacle.Hosting.Tests;
 
@@ -242,6 +245,83 @@ public sealed class BrokerHttpTests
     private static string WorkerJobPath(JobClaim claim) =>
         $"{WorkerContract.Route}/jobs/{claim.JobId}/claims/{claim.Fence}";
 
+    [Fact]
+    public async Task FreshMcpClientRecoversSessionAndBrokerRejectsStaleEdgeGrants()
+    {
+        using var fixture = new BrokerFixture();
+        fixture.SetPolicy("first", "second");
+        using var broker = await fixture.StartAsync("first");
+        await using var host = await fixture.StartMcpAsync();
+        var endpoint = new Uri(new Uri(host.Urls.Single()), "/mcp");
+        using var transport = fixture.ConnectMcpHttp(endpoint);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var ct = timeout.Token;
+        var metadata = await transport.GetFromJsonAsync<JsonElement>("/.well-known/oauth-protected-resource/mcp", ct);
+        Assert.Equal(Audience, metadata.GetProperty("resource").GetString());
+        Assert.Equal(Issuer, metadata.GetProperty("authorization_servers")[0].GetString());
+
+        using var missing = await transport.PostAsJsonAsync(endpoint, new { }, ct);
+        Assert.Equal(HttpStatusCode.Unauthorized, missing.StatusCode);
+        Assert.Contains("resource_metadata=\"https://hosting.example/.well-known/oauth-protected-resource/mcp\"",
+            missing.Headers.WwwAuthenticate.ToString());
+        using var unlisted = fixture.ConnectMcpHttp(endpoint, "unlisted");
+        foreach (var message in new[]
+        {
+            """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}""",
+            """{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""",
+            """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_list","arguments":{"project":"demo"}}}"""
+        })
+        {
+            using var denied = await unlisted.PostAsync(endpoint,
+                new StringContent(message, System.Text.Encoding.UTF8, "application/json"), ct);
+            Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        }
+
+        var mutation = Guid.NewGuid();
+        var arguments = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo", ["task"] = "fixture" };
+        SessionStatus original;
+        using (var firstHttp = fixture.ConnectMcpHttp(endpoint, "first"))
+        await using (var first = await ConnectMcp(endpoint, firstHttp, ct))
+        {
+            var tools = await first.ListToolsAsync(cancellationToken: ct);
+            Assert.Contains(tools, tool => tool.Name == "session_start");
+            original = ReadMcpStatus(await first.CallToolAsync("session_start", arguments, cancellationToken: ct));
+        }
+
+        var lookup = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo" };
+        var status = new Dictionary<string, object?> { ["sessionId"] = original.SessionId };
+        using var freshHttp = fixture.ConnectMcpHttp(endpoint, "first");
+        await using var fresh = await ConnectMcp(endpoint, freshHttp, ct);
+        Assert.Equal(original.SessionId, ReadMcpStatus(await fresh.CallToolAsync("session_lookup", lookup, cancellationToken: ct)).SessionId);
+        Assert.Equal(original.Jobs.ToArray(),
+            ReadMcpStatus(await fresh.CallToolAsync("session_status", status, cancellationToken: ct)).Jobs.ToArray());
+        Assert.Equal(original.SessionId,
+            ReadMcpStatus(await fresh.CallToolAsync("session_start", arguments, cancellationToken: ct)).SessionId);
+
+        using var secondHttp = fixture.ConnectMcpHttp(endpoint, "second");
+        await using var second = await ConnectMcp(endpoint, secondHttp, ct);
+        Assert.True((await second.CallToolAsync("session_status", status, cancellationToken: ct)).IsError);
+
+        fixture.SetPolicy("second");
+        Assert.Contains(await fresh.ListToolsAsync(cancellationToken: ct), tool => tool.Name == "session_start");
+        Assert.True((await fresh.CallToolAsync("session_start", arguments, cancellationToken: ct)).IsError);
+        Assert.True((await fresh.CallToolAsync("session_status", status, cancellationToken: ct)).IsError);
+    }
+
+    private static Task<McpClient> ConnectMcp(Uri endpoint, HttpClient client, CancellationToken cancellationToken) =>
+        McpClient.CreateAsync(new HttpClientTransport(new HttpClientTransportOptions
+        {
+            Endpoint = endpoint,
+            TransportMode = HttpTransportMode.StreamableHttp
+        }, client), cancellationToken: cancellationToken);
+
+    private static SessionStatus ReadMcpStatus(ModelContextProtocol.Protocol.CallToolResult result)
+    {
+        Assert.NotEqual(true, result.IsError);
+        return Assert.IsType<JsonElement>(result.StructuredContent)
+            .Deserialize<SessionStatus>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+    }
+
     private static async Task AssertDenied(HttpClient client, StartSession request, string status, string lookup)
     {
         using var start = await client.PostAsJsonAsync(Sessions, request);
@@ -303,6 +383,39 @@ public sealed class BrokerHttpTests
             return Connect(Token(subject));
         }
 
+        public async Task<WebApplication> StartMcpAsync()
+        {
+            var edgePolicy = Path.Combine(directory.FullName, "edge-policy.json");
+            var edgeCertificate = Path.Combine(directory.FullName, "edge.pfx");
+            File.Copy(PolicyPath, edgePolicy);
+            File.WriteAllBytes(edgeCertificate, edge.Export(X509ContentType.Pfx));
+            var builder = WebApplication.CreateBuilder();
+            builder.Logging.ClearProviders();
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Mcp:Authentication:Issuer"] = Issuer,
+                ["Mcp:Authentication:Audience"] = Audience,
+                ["Mcp:Authentication:Scope"] = Scope,
+                ["Mcp:PolicyFile"] = edgePolicy,
+                ["Mcp:BrokerUrl"] = app!.Urls.Single(),
+                ["Mcp:BrokerClientCertificateFile"] = edgeCertificate,
+                ["Kestrel:Endpoints:Fixture:Url"] = "https://127.0.0.1:0",
+                ["Kestrel:Certificates:Default:Path"] = Path.Combine(directory.FullName, "server.pfx")
+            });
+            builder.Services.Configure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme,
+                options => options.BackchannelHttpHandler = new DiscoveryHandler(this));
+            builder.Services.PostConfigure<HttpClientFactoryOptions>(McpApplication.BrokerClientName,
+                options => options.HttpMessageHandlerBuilderActions.Add(handler =>
+                    ((HttpClientHandler)handler.PrimaryHandler).ServerCertificateCustomValidationCallback =
+                    (_, cert, _, _) => server.Equals(cert)));
+            var host = McpApplication.Build(builder);
+            await host.StartAsync();
+            return host;
+        }
+
+        public HttpClient ConnectMcpHttp(Uri endpoint, string? subject = null) =>
+            Connect(endpoint, subject is null ? null : Token(subject), null);
+
         public async Task StopAsync()
         {
             if (app is { } running)
@@ -319,7 +432,10 @@ public sealed class BrokerHttpTests
         public HttpClient Connect(string? token, bool useEdgeCertificate = true) =>
             Connect(token, useEdgeCertificate ? edge : null);
 
-        private HttpClient Connect(string? token, X509Certificate2? certificate)
+        private HttpClient Connect(string? token, X509Certificate2? certificate) =>
+            Connect(new Uri(app!.Urls.Single()), token, certificate);
+
+        private HttpClient Connect(Uri endpoint, string? token, X509Certificate2? certificate)
         {
             var handler = new HttpClientHandler
             {
@@ -330,7 +446,7 @@ public sealed class BrokerHttpTests
                 handler.ClientCertificates.Add(certificate);
             }
 
-            var client = new HttpClient(handler) { BaseAddress = new Uri(app!.Urls.Single()), Timeout = TimeSpan.FromSeconds(15) };
+            var client = new HttpClient(handler) { BaseAddress = endpoint, Timeout = TimeSpan.FromSeconds(15) };
             if (token is not null)
             {
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);

@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Monstertacle.Hosting.Contracts;
-using Access = Monstertacle.Hosting.ControlPlane.BrokerPolicy.Access;
+using Access = Monstertacle.Hosting.Security.BrokerPolicy.Access;
 
 namespace Monstertacle.Hosting.ControlPlane;
 
