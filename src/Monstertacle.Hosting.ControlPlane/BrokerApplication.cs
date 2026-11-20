@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Monstertacle.Hosting.Contracts;
 using Access = Monstertacle.Hosting.ControlPlane.BrokerPolicy.Access;
 
@@ -10,7 +11,7 @@ public static class BrokerApplication
     {
         var authentication = new BrokerAuthentication(builder.Configuration);
         authentication.Configure(builder);
-        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.TryAddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<BrokerPolicy>();
         builder.Services.AddSingleton<SessionStore>();
 

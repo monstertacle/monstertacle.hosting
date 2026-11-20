@@ -33,7 +33,7 @@ internal sealed class BrokerPolicy(IConfiguration configuration)
 
         try
         {
-            using var input = File.OpenRead(path);
+            using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
             if (input.Length is <= 0 or > MaximumBytes)
             {
                 return null;

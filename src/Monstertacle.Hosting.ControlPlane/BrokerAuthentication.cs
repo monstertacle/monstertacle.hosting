@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
+using Microsoft.IdentityModel.Tokens;
 
 namespace Monstertacle.Hosting.ControlPlane;
 
@@ -50,6 +51,8 @@ public sealed class BrokerAuthentication
         {
             options.Authority = issuer;
             options.RequireHttpsMetadata = true;
+            options.BackchannelHttpHandler ??= new HttpClientHandler { AllowAutoRedirect = false };
+            options.BackchannelTimeout = TimeSpan.FromSeconds(10);
             options.MapInboundClaims = false;
             options.IncludeErrorDetails = false;
             options.SaveToken = false;
@@ -60,7 +63,7 @@ public sealed class BrokerAuthentication
             validation.IssuerValidator = (value, _, _) =>
                 string.Equals(value, issuer, StringComparison.Ordinal)
                     ? value
-                    : throw new Microsoft.IdentityModel.Tokens.SecurityTokenInvalidIssuerException();
+                    : throw new SecurityTokenInvalidIssuerException();
             validation.ValidateAudience = true;
             validation.ValidAudience = audience;
             validation.IgnoreTrailingSlashWhenValidatingAudience = false;
@@ -71,9 +74,15 @@ public sealed class BrokerAuthentication
             validation.ClockSkew = TimeSpan.Zero;
             validation.RequireSignedTokens = true;
             validation.ValidateIssuerSigningKey = true;
+            validation.AlgorithmValidator = IssuerDiscovery.AcceptsAlgorithm;
 
             options.Events = new JwtBearerEvents
             {
+                OnAuthenticationFailed = context =>
+                {
+                    context.Fail("The access token could not be verified.");
+                    return Task.CompletedTask;
+                },
                 OnTokenValidated = context =>
                 {
                     var subject = context.Principal?.FindAll("sub").Take(2).ToArray();
@@ -89,6 +98,9 @@ public sealed class BrokerAuthentication
                 }
             };
         });
+        builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+            .PostConfigure<TimeProvider>((options, time) =>
+                options.ConfigurationManager = new IssuerDiscovery(issuer, options.Backchannel, time));
         builder.Services.AddAuthorization();
     }
 
@@ -105,7 +117,7 @@ public sealed class BrokerAuthentication
     {
         var value = settings[key];
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||
-            uri.UserInfo.Length != 0 || uri.Fragment.Length != 0)
+            uri.UserInfo.Length != 0 || uri.Fragment.Length != 0 || (key == "Issuer" && uri.Query.Length != 0))
         {
             throw new InvalidOperationException($"Broker authentication requires an HTTPS {key} URI.");
         }

@@ -37,7 +37,11 @@ private endpoint requires the edge client's TLS certificate, pinned by
 `Broker__Authentication__EdgeCertificateSha256`, and a bearer access token.
 Set `Broker__Authentication__Issuer`, `Broker__Authentication__Audience`, and
 `Broker__Authentication__Scope`. The issuer serves HTTPS OpenID Connect
-metadata and signing keys. The API requires a single exact audience.
+metadata and signing keys. The discovery issuer and signed token issuer must
+match the configured issuer exactly. The broker trusts supported asymmetric
+signing keys from the HTTPS JWKS URL supplied by that metadata. It refreshes
+that trust within five minutes and rejects invalid discovery on refresh. The
+API requires a single exact audience.
 
 Set `Broker__PolicyFile` to an operator-managed JSON file. Replace the file
 atomically when changing grants. Each request reads and validates the current
