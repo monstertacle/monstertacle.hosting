@@ -1,0 +1,6 @@
+# Per-checkout feature selection and runtime state
+feature.json
+workflows/runs/
+integrations/packages/
+integrations/packages.json
+extensions/*/local-config.yml
