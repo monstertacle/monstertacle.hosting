@@ -1,7 +1,7 @@
 # Tasks: Durable session admission and reconnect
 
 - [x] T001 Scaffold and author all feature plans before implementation.
-- [ ] T002 Add .NET 11 solution, versioned contracts and GitHub CI.
+- [x] T002 Add .NET 11 solution, versioned contracts and GitHub CI.
 - [ ] T003 Implement exact JWT validation, reloadable fail-closed allowlist and
   per-action grants.
 - [ ] T004 Implement transactional admission, scoped replay, lookup, status

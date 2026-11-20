@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Monstertacle.Hosting.Contracts/Monstertacle.Hosting.Contracts.csproj" />
+    <Project Path="src/Monstertacle.Hosting.ControlPlane/Monstertacle.Hosting.ControlPlane.csproj" />
+    <Project Path="src/Monstertacle.Hosting.McpHost/Monstertacle.Hosting.McpHost.csproj" />
+    <Project Path="src/Monstertacle.Hosting.WorkerHost/Monstertacle.Hosting.WorkerHost.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Monstertacle.Hosting.Tests/Monstertacle.Hosting.Tests.csproj" />
+  </Folder>
+</Solution>

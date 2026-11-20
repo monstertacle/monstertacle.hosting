@@ -13,3 +13,17 @@ and result custody. Workers run registered execution plans.
 
 The repository uses .NET 11 (`net11.0` and `net11.0-windows` where applicable),
 C#, and shell or PowerShell. See the [constitution](.specify/memory/constitution.md).
+
+## Build and test
+
+Install the .NET 11 SDK specified in `global.json`, then run:
+
+```sh
+dotnet restore
+dotnet build --no-restore -c Release
+dotnet test --no-build -c Release
+```
+
+The initial solution includes the three host entry points and version 1
+admission contract. The current contract tests exercise input limits and repeatable
+payload digests. Service admission and reconnect are tracked in the feature plans.
