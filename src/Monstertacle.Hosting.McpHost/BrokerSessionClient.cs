@@ -35,7 +35,7 @@ internal sealed class BrokerSessionClient(IHttpClientFactory clients, IHttpConte
                     HttpStatusCode.BadRequest => "The session request is invalid.",
                     HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => "Session access denied.",
                     HttpStatusCode.NotFound => "The requested session is unavailable.",
-                    HttpStatusCode.Conflict => "The mutation ID is already bound to a different request.",
+                    HttpStatusCode.Conflict => "The request conflicts with the current session state or an existing mutation.",
                     HttpStatusCode.TooManyRequests => "The project has reached its admission limit.",
                     _ => "The session broker is unavailable. Reuse the same mutation ID when retrying a mutation."
                 });

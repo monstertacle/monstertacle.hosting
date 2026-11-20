@@ -46,6 +46,7 @@ internal sealed partial class SessionStore
         var schemaVersion = (long)version.ExecuteScalar()!;
         switch (schemaVersion)
         {
+            case 5L:
             case 4L:
             case 3L:
             case 2L:
@@ -133,6 +134,23 @@ internal sealed partial class SessionStore
                     PRIMARY KEY (job_id, name)
                 ) STRICT;
                 PRAGMA user_version = 4;
+                """);
+            upgrade.ExecuteNonQuery();
+        }
+
+        if (schemaVersion < 5L)
+        {
+            using var upgrade = Command(connection, transaction, """
+                CREATE TABLE result_acceptances (
+                    principal TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    mutation TEXT NOT NULL,
+                    session_id TEXT NOT NULL REFERENCES sessions(id),
+                    digest TEXT NOT NULL,
+                    accepted_utc TEXT NOT NULL,
+                    PRIMARY KEY (principal, project, mutation)
+                ) STRICT;
+                PRAGMA user_version = 5;
                 """);
             upgrade.ExecuteNonQuery();
         }

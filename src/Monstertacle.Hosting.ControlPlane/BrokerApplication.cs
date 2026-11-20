@@ -77,6 +77,20 @@ public static class BrokerApplication
             HttpContext context, SessionStore store) => ReadStatus(store.Lookup(Caller(context), project, mutationId)));
         sessions.MapGet("", List);
         sessions.MapPost("/{sessionId:guid}/cancel", Cancel);
+        sessions.MapGet("/{sessionId:guid}/result", (Guid sessionId, HttpContext context, SessionStore store) =>
+            store.ReadResults(Caller(context), sessionId) is { } result ? Results.Ok(result) : Results.NotFound());
+        sessions.MapGet("/{sessionId:guid}/jobs/{jobId:guid}/artifacts/{name}", (Guid sessionId, Guid jobId, string name,
+            HttpContext context, SessionStore store) => store.ReadArtifact(Caller(context), sessionId, jobId, name) is { } artifact
+                ? Results.Ok(artifact)
+                : Results.NotFound());
+        sessions.MapPost("/{sessionId:guid}/result/accept", (Guid sessionId, AcceptResult request, HttpContext context,
+            SessionStore store) => store.Accept(Caller(context), sessionId, request) switch
+            {
+                (SessionStore.ResultOutcome.Accepted, var receipt) => Results.Ok(receipt),
+                (SessionStore.ResultOutcome.Invalid, _) => Results.BadRequest(),
+                (SessionStore.ResultOutcome.Conflict, _) => Results.Conflict(),
+                _ => Results.NotFound()
+            });
 
         var workers = app.MapGroup(WorkerContract.Route);
         workers.MapPost("/claims", (ClaimJob request, HttpContext context, SessionStore store) =>

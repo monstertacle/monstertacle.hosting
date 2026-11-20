@@ -176,3 +176,25 @@ composition root. Keep its ID and serialization contract stable across worker
 restarts. Task input cannot select the agent, profile, model or credentials.
 The offline suite executes this registration with a deterministic chat client
 through two worker lanes. Live agent qualification requires deployment inputs.
+
+## Verified results
+
+`session_result` returns the current aggregate digest and the status of every
+child. A child can have a verified result even while the aggregate is partial.
+A complete aggregate may contain failed or cancelled children. The private
+equivalent is `GET /v1/sessions/{sessionId}/result`. It requires current
+`read` and `result` grants for every child lane.
+
+`session_artifact` takes the session ID, job ID and artifact name in a child
+manifest. The private equivalent is
+`GET /v1/sessions/{sessionId}/jobs/{jobId}/artifacts/{name}`. Both return a
+bounded base64 payload, size and SHA-256 digest. The broker rechecks the
+artifact bytes and requires current `read` and `artifact` grants for that
+child lane.
+
+Use `session_accept_result` or `POST /v1/sessions/{sessionId}/result/accept`
+with the complete aggregate digest and a stable mutation ID to explicitly
+accept a result. The broker validates current `read`, `result` and
+`accept-result` grants for every lane and verifies stored artifact bytes
+before returning a receipt, including on retry. Reading a result does not
+create an acceptance receipt.

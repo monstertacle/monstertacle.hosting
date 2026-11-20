@@ -2,7 +2,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Monstertacle.Hosting.Contracts;
-using Monstertacle.Hosting.Security;
 using Worker = Monstertacle.Hosting.ControlPlane.WorkerRegistrations.WorkerIdentity;
 
 namespace Monstertacle.Hosting.ControlPlane;
@@ -78,7 +77,7 @@ internal sealed partial class SessionStore
         var bytesRemaining = ResultContract.MaxTotalArtifactBytes;
         foreach (var artifact in completion.Artifacts)
         {
-            if (artifact is null || !BrokerPolicy.ValidName(artifact.Name) || !names.Add(artifact.Name) ||
+            if (artifact is null || !ResultContract.IsArtifactName(artifact.Name) || !names.Add(artifact.Name) ||
                 artifact.Content is null || artifact.Bytes != artifact.Content.Length ||
                 artifact.Bytes > bytesRemaining || !string.Equals(artifact.Sha256, Sha256(artifact.Content), StringComparison.Ordinal))
             {

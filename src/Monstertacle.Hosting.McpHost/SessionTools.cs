@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using Monstertacle.Hosting.Contracts;
 
@@ -38,5 +39,31 @@ internal sealed class SessionTools
     public static Task<SessionStatus> Cancel(Guid sessionId, Guid mutationId, BrokerSessionClient broker,
         CancellationToken cancellationToken) =>
         broker.Send<SessionStatus>(HttpMethod.Post, $"{Route}/{sessionId:D}/cancel", new CancelSession(mutationId),
+            cancellationToken);
+
+    [McpServerTool(Name = "session_result", UseStructuredContent = true, ReadOnly = true)]
+    [Description("Read a verified result manifest and the state of each child. Partial manifests cannot be accepted.")]
+    public static Task<VerifiedSessionResult> Result(Guid sessionId, BrokerSessionClient broker, CancellationToken cancellationToken) =>
+        broker.Send<VerifiedSessionResult>(HttpMethod.Get, $"{Route}/{sessionId:D}/result", null, cancellationToken);
+
+    [McpServerTool(Name = "session_artifact", UseStructuredContent = true, ReadOnly = true)]
+    [Description("Read a bounded result artifact by session, job and manifest artifact name. Content is base64.")]
+    public static Task<ArtifactContent> Artifact(Guid sessionId, Guid jobId, string name, BrokerSessionClient broker,
+        CancellationToken cancellationToken)
+    {
+        if (!ResultContract.IsArtifactName(name))
+        {
+            throw new McpException("The artifact name is invalid.");
+        }
+
+        return broker.Send<ArtifactContent>(HttpMethod.Get, $"{Route}/{sessionId:D}/jobs/{jobId:D}/artifacts/{name}",
+            null, cancellationToken);
+    }
+
+    [McpServerTool(Name = "session_accept_result", UseStructuredContent = true)]
+    [Description("Explicitly accept a complete verified result by its digest and a durable mutation ID.")]
+    public static Task<ResultAcceptance> Accept(Guid sessionId, Guid mutationId, string sha256, BrokerSessionClient broker,
+        CancellationToken cancellationToken) =>
+        broker.Send<ResultAcceptance>(HttpMethod.Post, $"{Route}/{sessionId:D}/result/accept", new AcceptResult(mutationId, sha256),
             cancellationToken);
 }

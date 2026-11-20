@@ -10,6 +10,7 @@ using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
@@ -371,6 +372,95 @@ public sealed class BrokerHttpTests
         return new("output", bytes.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes);
     }
 
+    [Fact]
+    public async Task ResultAccessVerifiesPartialResultsArtifactsAndRevocationAcrossHttpsAndMcp()
+    {
+        using var fixture = new BrokerFixture();
+        fixture.SetPolicy("first", "second");
+        fixture.RegisterWorker("primary");
+        fixture.RegisterWorker("secondary");
+        using var caller = await fixture.StartAsync("first");
+        using var other = fixture.Connect(fixture.Token("second"));
+        using var primary = fixture.ConnectWorker("primary");
+        using var secondary = fixture.ConnectWorker("secondary");
+        await using var edge = await fixture.StartMcpAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var ct = timeout.Token;
+
+        using var started = await caller.PostAsJsonAsync(Sessions, new StartSession(Guid.NewGuid(), "demo", "fixture"), ct);
+        var admitted = await ReadStatus(started);
+        var first = await Claim(primary, new(Guid.NewGuid()));
+        var second = await Claim(secondary, new(Guid.NewGuid()));
+        var firstPath = WorkerJobPath(first);
+        var secondPath = WorkerJobPath(second);
+        using var firstDispatch = await primary.PostAsync($"{firstPath}/dispatch", null, ct);
+        using var secondDispatch = await secondary.PostAsync($"{secondPath}/dispatch", null, ct);
+        firstDispatch.EnsureSuccessStatusCode();
+        secondDispatch.EnsureSuccessStatusCode();
+
+        var artifact = Output("verified answer");
+        using var firstStored = await primary.PostAsJsonAsync($"{firstPath}/result",
+            new JobCompletion(ResultContract.Version, admitted.SessionId, first.JobId,
+                new("succeeded", "confirmed-ended"), [artifact]), ct);
+        firstStored.EnsureSuccessStatusCode();
+        var resultPath = $"{Sessions}/{admitted.SessionId}/result";
+        var artifactPath = $"{Sessions}/{admitted.SessionId}/jobs/{first.JobId}/artifacts/{artifact.Name}";
+        var partial = (await caller.GetFromJsonAsync<VerifiedSessionResult>(resultPath, ct))!;
+        Assert.False(partial.Manifest.Complete);
+        Assert.Equal("dispatch-authorized", partial.Manifest.Jobs.Single(job => job.Status.JobId == second.JobId).Status.State);
+        var acceptance = new AcceptResult(Guid.NewGuid(), partial.Sha256);
+        using var partialAcceptance = await caller.PostAsJsonAsync($"{resultPath}/accept", acceptance, ct);
+        Assert.Equal(HttpStatusCode.Conflict, partialAcceptance.StatusCode);
+
+        using var secondStored = await secondary.PostAsJsonAsync($"{secondPath}/result",
+            new JobCompletion(ResultContract.Version, admitted.SessionId, second.JobId, new("failed", "confirmed-ended"), []), ct);
+        secondStored.EnsureSuccessStatusCode();
+        var complete = (await caller.GetFromJsonAsync<VerifiedSessionResult>(resultPath, ct))!;
+        Assert.True(complete.Manifest.Complete);
+        Assert.NotEqual(partial.Sha256, complete.Sha256);
+        Assert.Equal("failed", complete.Manifest.Jobs.Single(job => job.Status.JobId == second.JobId).Status.State);
+
+        var content = (await caller.GetFromJsonAsync<ArtifactContent>(artifactPath, ct))!;
+        Assert.Equal(artifact.Content, content.Content);
+        Assert.Equal(content.Artifact.Sha256, Convert.ToHexStringLower(SHA256.HashData(content.Content)));
+        using var crossOwner = await other.GetAsync(artifactPath, ct);
+        Assert.Equal(HttpStatusCode.NotFound, crossOwner.StatusCode);
+
+        var endpoint = new Uri(new Uri(edge.Urls.Single()), "/mcp");
+        using var http = fixture.ConnectMcpHttp(endpoint, "first");
+        await using var mcp = await ConnectMcp(endpoint, http, ct);
+        var args = new Dictionary<string, object?> { ["sessionId"] = admitted.SessionId };
+        var mcpResult = ReadMcp<VerifiedSessionResult>(await mcp.CallToolAsync("session_result", args, cancellationToken: ct));
+        Assert.Equal(complete.Sha256, mcpResult.Sha256);
+        var artifactArgs = new Dictionary<string, object?>(args) { ["jobId"] = first.JobId, ["name"] = artifact.Name };
+        var mcpArtifact = ReadMcp<ArtifactContent>(await mcp.CallToolAsync("session_artifact", artifactArgs, cancellationToken: ct));
+        Assert.Equal(artifact.Content, mcpArtifact.Content);
+
+        acceptance = acceptance with { Sha256 = complete.Sha256 };
+        var acceptArgs = new Dictionary<string, object?>(args) { ["mutationId"] = acceptance.MutationId, ["sha256"] = acceptance.Sha256 };
+        var receipt = ReadMcp<ResultAcceptance>(await mcp.CallToolAsync("session_accept_result", acceptArgs, cancellationToken: ct));
+        using var identical = await caller.PostAsJsonAsync($"{resultPath}/accept", acceptance, ct);
+        Assert.Equal(receipt, await identical.Content.ReadFromJsonAsync<ResultAcceptance>(ct));
+        using var changed = await caller.PostAsJsonAsync($"{resultPath}/accept", acceptance with { Sha256 = partial.Sha256 }, ct);
+        Assert.Equal(HttpStatusCode.Conflict, changed.StatusCode);
+
+        fixture.SetPolicyWithLanes(["first", "second"], ["secondary"]);
+        using var revoked = await caller.GetAsync(artifactPath, ct);
+        using var revokedReplay = await caller.PostAsJsonAsync($"{resultPath}/accept", acceptance, ct);
+        Assert.Equal(HttpStatusCode.NotFound, revoked.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, revokedReplay.StatusCode);
+        Assert.True((await mcp.CallToolAsync("session_result", args, cancellationToken: ct)).IsError);
+        Assert.True((await mcp.CallToolAsync("session_artifact", artifactArgs, cancellationToken: ct)).IsError);
+        Assert.True((await mcp.CallToolAsync("session_accept_result", acceptArgs, cancellationToken: ct)).IsError);
+
+        fixture.SetPolicy("first", "second");
+        fixture.CorruptArtifact(first.JobId);
+        using var corruptRead = await caller.GetAsync(artifactPath, ct);
+        using var corruptReplay = await caller.PostAsJsonAsync($"{resultPath}/accept", acceptance, ct);
+        Assert.Equal(HttpStatusCode.InternalServerError, corruptRead.StatusCode);
+        Assert.Equal(HttpStatusCode.InternalServerError, corruptReplay.StatusCode);
+    }
+
     private sealed class FixtureChatClient : IChatClient
     {
         private int calls;
@@ -486,11 +576,14 @@ public sealed class BrokerHttpTests
             TransportMode = HttpTransportMode.StreamableHttp
         }, client), cancellationToken: cancellationToken);
 
-    private static SessionStatus ReadMcpStatus(ModelContextProtocol.Protocol.CallToolResult result)
+    private static SessionStatus ReadMcpStatus(ModelContextProtocol.Protocol.CallToolResult result) =>
+        ReadMcp<SessionStatus>(result);
+
+    private static T ReadMcp<T>(ModelContextProtocol.Protocol.CallToolResult result)
     {
         Assert.NotEqual(true, result.IsError);
         return Assert.IsType<JsonElement>(result.StructuredContent)
-            .Deserialize<SessionStatus>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            .Deserialize<T>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
     }
 
     private static async Task AssertDenied(HttpClient client, StartSession request, string status, string lookup)
@@ -522,6 +615,17 @@ public sealed class BrokerHttpTests
         public string MetadataIssuer { get; set; } = Issuer;
         public int KeyRequests => Volatile.Read(ref keyRequests);
         public string WorkerDirectory => Path.Combine(directory.FullName, "worker");
+
+        public void CorruptArtifact(Guid jobId)
+        {
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+                { DataSource = Path.Combine(directory.FullName, "broker.db"), Pooling = false }.ToString());
+            connection.Open();
+            using var change = connection.CreateCommand();
+            change.CommandText = "UPDATE job_artifacts SET content = zeroblob(bytes) WHERE job_id = $job;";
+            change.Parameters.AddWithValue("$job", jobId.ToString("D"));
+            Assert.Equal(1, change.ExecuteNonQuery());
+        }
 
         public async Task<HttpClient> StartAsync(string subject)
         {
@@ -653,7 +757,7 @@ public sealed class BrokerHttpTests
                 id = name,
                 identities = new[] { new { issuer = Issuer, subject = name } },
                 grants = lanes.Select(lane =>
-                    new { project = "demo", lane, actions = new[] { "start", "read", "cancel" } })
+                    new { project = "demo", lane, actions = new[] { "start", "read", "cancel", "result", "artifact", "accept-result" } })
             })
         }));
 

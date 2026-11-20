@@ -98,7 +98,7 @@ internal sealed class BrokerPolicy(IConfiguration configuration)
         return values.All(seen.Add);
     }
 
-    private static bool IsKnownAction(string? action) => action is "start" or "read" or "cancel";
+    private static bool IsKnownAction(string? action) => action is "start" or "read" or "cancel" or "result" or "artifact" or "accept-result";
 
     internal sealed record Policy(int Version, Person[] People, Project[] Projects);
     internal sealed record Identity(string? Issuer, string? Subject);
