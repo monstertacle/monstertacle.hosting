@@ -13,6 +13,7 @@ public sealed class BrokerAuthentication
     private readonly string audience;
     private readonly string scope;
     private readonly byte[] edgeCertificateHash;
+    private readonly WorkerRegistrations workers;
 
     public BrokerAuthentication(IConfiguration configuration)
     {
@@ -32,6 +33,7 @@ public sealed class BrokerAuthentication
         }
 
         edgeCertificateHash = Convert.FromHexString(fingerprint);
+        workers = new WorkerRegistrations(configuration, fingerprint);
     }
 
     public void Configure(WebApplicationBuilder builder)
@@ -43,7 +45,8 @@ public sealed class BrokerAuthentication
             {
                 https.SslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13;
                 https.ClientCertificateMode = ClientCertificateMode.RequireCertificate;
-                https.ClientCertificateValidation = (certificate, _, _) => IsEdgeCertificate(certificate);
+                https.ClientCertificateValidation = (certificate, _, _) =>
+                    IsEdgeCertificate(certificate) || workers.Resolve(certificate) is not null;
             });
         });
 
@@ -106,6 +109,9 @@ public sealed class BrokerAuthentication
 
     public bool IsEdgeRequest(HttpContext context) =>
         context.Request.IsHttps && IsEdgeCertificate(context.Connection.ClientCertificate);
+
+    internal WorkerRegistrations.WorkerIdentity? Worker(HttpContext context) =>
+        context.Request.IsHttps ? workers.Resolve(context.Connection.ClientCertificate) : null;
 
     private bool IsEdgeCertificate(X509Certificate2? certificate) =>
         certificate is not null &&

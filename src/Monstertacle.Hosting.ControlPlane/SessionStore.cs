@@ -6,10 +6,10 @@ using Access = Monstertacle.Hosting.ControlPlane.BrokerPolicy.Access;
 
 namespace Monstertacle.Hosting.ControlPlane;
 
-internal sealed class SessionStore
+internal sealed partial class SessionStore
 {
     private const string Projection = """
-        SELECT s.id, s.project, s.admitted_utc, s.payload_digest, j.id, j.lane, j.state
+        SELECT s.id, s.project, s.admitted_utc, s.payload_digest, j.id, j.lane, j.state, j.cancel_requested
         FROM sessions s JOIN jobs j ON j.session_id = s.id
         """;
 
@@ -42,8 +42,10 @@ internal sealed class SessionStore
 
         using var transaction = connection.BeginTransaction();
         using var version = Command(connection, transaction, "PRAGMA user_version;");
-        switch (version.ExecuteScalar())
+        var schemaVersion = (long)version.ExecuteScalar()!;
+        switch (schemaVersion)
         {
+            case 2L:
             case 1L:
                 break;
             case 0L:
@@ -80,6 +82,27 @@ internal sealed class SessionStore
                 throw new InvalidOperationException("Unsupported broker database schema.");
         }
 
+        if (schemaVersion < 2L)
+        {
+            using var upgrade = Command(connection, transaction, """
+                ALTER TABLE jobs ADD COLUMN worker_id TEXT;
+                ALTER TABLE jobs ADD COLUMN claim_mutation TEXT;
+                ALTER TABLE jobs ADD COLUMN fence TEXT;
+                ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
+                CREATE UNIQUE INDEX claims_by_worker ON jobs (worker_id, claim_mutation);
+                CREATE INDEX jobs_by_lane ON jobs (lane, state, session_id);
+                CREATE TABLE cancellations (
+                    session_id TEXT NOT NULL REFERENCES sessions(id),
+                    principal TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    mutation_id TEXT NOT NULL,
+                    PRIMARY KEY (principal, project, mutation_id)
+                ) STRICT;
+                PRAGMA user_version = 2;
+                """);
+            upgrade.ExecuteNonQuery();
+        }
+
         transaction.Commit();
     }
 
@@ -111,6 +134,20 @@ internal sealed class SessionStore
         if (plan is null || !access.Allows(request.Project, plan, "start") || !access.Allows(request.Project, plan, "read"))
         {
             return new(AdmissionOutcome.Denied);
+        }
+
+        using (var queue = Command(connection, transaction, """
+            SELECT COUNT(*) FROM sessions AS s
+            WHERE s.project = $project AND EXISTS (
+                SELECT 1 FROM jobs j WHERE j.session_id = s.id
+                AND j.state IN ('queued', 'claimed', 'dispatch-authorized')
+            );
+            """, ("$project", request.Project)))
+        {
+            if ((long)queue.ExecuteScalar()! >= 256)
+            {
+                return new(AdmissionOutcome.Capacity);
+            }
         }
 
         var id = Guid.NewGuid();
@@ -244,7 +281,7 @@ internal sealed class SessionStore
                 entries.Add(current);
             }
 
-            current.Jobs.Add(new(Guid.ParseExact(reader.GetString(4), "D"), reader.GetString(5), reader.GetString(6)));
+            current.Jobs.Add(new(Guid.ParseExact(reader.GetString(4), "D"), reader.GetString(5), reader.GetString(6), reader.GetBoolean(7)));
         }
 
         return entries;
@@ -252,5 +289,5 @@ internal sealed class SessionStore
 
     private sealed record Entry(Guid Id, string Project, DateTimeOffset Admitted, string Digest, List<JobStatus> Jobs);
     public sealed record Admission(AdmissionOutcome Outcome, SessionStatus? Session = null);
-    public enum AdmissionOutcome { Created, Replayed, Conflict, Denied }
+    public enum AdmissionOutcome { Created, Replayed, Conflict, Denied, Capacity }
 }

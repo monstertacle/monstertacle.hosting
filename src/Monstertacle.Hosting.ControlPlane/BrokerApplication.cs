@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Monstertacle.Hosting.Contracts;
 using Access = Monstertacle.Hosting.ControlPlane.BrokerPolicy.Access;
+using Worker = Monstertacle.Hosting.ControlPlane.WorkerRegistrations.WorkerIdentity;
 
 namespace Monstertacle.Hosting.ControlPlane;
 
@@ -30,8 +31,26 @@ public static class BrokerApplication
                     return;
                 }
             }
+            else if (context.Request.Path.StartsWithSegments(WorkerContract.Route))
+            {
+                context.Response.Headers.CacheControl = "no-store";
+                if (authentication.Worker(context) is not { } worker)
+                {
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    return;
+                }
 
-            await next(context);
+                context.Items[typeof(Worker)] = worker;
+            }
+
+            try
+            {
+                await next(context);
+            }
+            catch (SqliteException error) when ((error.SqliteErrorCode is 5 or 6) && !context.Response.HasStarted)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            }
         });
         app.UseAuthentication();
         app.UseAuthorization();
@@ -49,14 +68,7 @@ public static class BrokerApplication
                 }
 
                 context.Items[typeof(Access)] = access;
-                try
-                {
-                    return await next(invocation);
-                }
-                catch (SqliteException error) when (error.SqliteErrorCode is 5 or 6)
-                {
-                    return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
-                }
+                return await next(invocation);
             });
 
         sessions.MapPost("", Start);
@@ -65,11 +77,37 @@ public static class BrokerApplication
         sessions.MapGet("/by-mutation/{project}/{mutationId:guid}", (string project, Guid mutationId,
             HttpContext context, SessionStore store) => ReadStatus(store.Lookup(Caller(context), project, mutationId)));
         sessions.MapGet("", List);
+        sessions.MapPost("/{sessionId:guid}/cancel", Cancel);
+
+        var workers = app.MapGroup(WorkerContract.Route);
+        workers.MapPost("/claims", (ClaimJob request, HttpContext context, SessionStore store) =>
+        {
+            if (request.MutationId == Guid.Empty)
+            {
+                return Results.BadRequest();
+            }
+
+            var claim = store.Claim(CurrentWorker(context), request.MutationId, policy);
+            return claim is null ? Results.NoContent() : Results.Ok(claim);
+        });
+        workers.MapGet("/jobs/{jobId:guid}/claims/{fence:guid}", (Guid jobId, Guid fence, HttpContext context,
+            SessionStore store) => store.Observe(CurrentWorker(context), jobId, fence) is { } claim
+                ? Results.Ok(claim)
+                : Results.NotFound());
+        workers.MapPost("/jobs/{jobId:guid}/claims/{fence:guid}/dispatch", (Guid jobId, Guid fence,
+            HttpContext context, SessionStore store) => store.AuthorizeDispatch(CurrentWorker(context), jobId, fence, policy) switch
+            {
+                { Outcome: SessionStore.DispatchOutcome.Authorized, Dispatch: var dispatch } => Results.Ok(dispatch),
+                { Outcome: SessionStore.DispatchOutcome.Denied } => Results.StatusCode(StatusCodes.Status403Forbidden),
+                { Outcome: SessionStore.DispatchOutcome.Unavailable } => Results.Conflict(),
+                _ => Results.NotFound()
+            });
 
         return app;
     }
 
     private static Access Caller(HttpContext context) => (Access)context.Items[typeof(Access)]!;
+    private static Worker CurrentWorker(HttpContext context) => (Worker)context.Items[typeof(Worker)]!;
 
     private static IResult Start(StartSession request, HttpContext context, SessionStore store)
     {
@@ -85,6 +123,7 @@ public static class BrokerApplication
                 Results.Created($"{SessionContract.Route}/{admission.Session!.SessionId:D}", admission.Session),
             SessionStore.AdmissionOutcome.Replayed => Results.Ok(admission.Session),
             SessionStore.AdmissionOutcome.Conflict => Results.Conflict(),
+            SessionStore.AdmissionOutcome.Capacity => Results.StatusCode(StatusCodes.Status429TooManyRequests),
             _ => Results.StatusCode(StatusCodes.Status403Forbidden)
         };
     }
@@ -104,4 +143,19 @@ public static class BrokerApplication
 
     private static IResult ReadStatus(SessionStatus? status) =>
         status is null ? Results.NotFound() : Results.Ok(status);
+
+    private static IResult Cancel(Guid sessionId, CancelSession request, HttpContext context, SessionStore store)
+    {
+        if (request.MutationId == Guid.Empty)
+        {
+            return Results.BadRequest();
+        }
+
+        return store.Cancel(Caller(context), sessionId, request.MutationId) switch
+        {
+            { Outcome: SessionStore.CancelOutcome.Accepted, Session: var status } => Results.Ok(status),
+            { Outcome: SessionStore.CancelOutcome.Conflict } => Results.Conflict(),
+            _ => Results.NotFound()
+        };
+    }
 }

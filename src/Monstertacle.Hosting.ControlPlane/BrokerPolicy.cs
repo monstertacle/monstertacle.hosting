@@ -19,12 +19,16 @@ internal sealed class BrokerPolicy(IConfiguration configuration)
     public Access? Resolve(ClaimsPrincipal user)
     {
         var identity = new Identity(user.FindFirstValue("iss"), user.FindFirstValue("sub"));
-        var policy = Read();
+        return Resolve(Read(), identity);
+    }
+
+    public static Access? Resolve(Policy? policy, Identity identity)
+    {
         var person = policy?.People.SingleOrDefault(person => person.Identities.Contains(identity));
         return policy is null || person is null ? null : new Access(person, identity, policy.Projects);
     }
 
-    private Policy? Read()
+    public Policy? Read()
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -84,7 +88,7 @@ internal sealed class BrokerPolicy(IConfiguration configuration)
                Unique(policy.People.SelectMany(person => person.Identities));
     }
 
-    private static bool ValidName(string? value) =>
+    internal static bool ValidName(string? value) =>
         value is { Length: > 0 and <= 64 } &&
         value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
@@ -94,7 +98,7 @@ internal sealed class BrokerPolicy(IConfiguration configuration)
         return values.All(seen.Add);
     }
 
-    private static bool IsKnownAction(string? action) => action is "start" or "read";
+    private static bool IsKnownAction(string? action) => action is "start" or "read" or "cancel";
 
     internal sealed record Policy(int Version, Person[] People, Project[] Projects);
     internal sealed record Identity(string? Issuer, string? Subject);

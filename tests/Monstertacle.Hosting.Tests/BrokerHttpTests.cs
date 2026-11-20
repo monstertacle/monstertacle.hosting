@@ -160,6 +160,88 @@ public sealed class BrokerHttpTests
         await fixture.StopAsync();
     }
 
+    [Fact]
+    public async Task WorkerClaimsAreLaneBoundAndCancellationFencesDispatchAcrossRestart()
+    {
+        using var fixture = new BrokerFixture();
+        fixture.RegisterWorker("primary");
+        fixture.RegisterWorker("secondary");
+        fixture.RegisterWorker("third");
+        fixture.SetPolicy("first");
+        using var caller = await fixture.StartAsync("first");
+        using var primary = fixture.ConnectWorker("primary");
+        using var secondary = fixture.ConnectWorker("secondary");
+        using var third = fixture.ConnectWorker("third");
+        var request = new StartSession(Guid.NewGuid(), "demo", "fixture");
+        using var accepted = await caller.PostAsJsonAsync(Sessions, request);
+        var session = await ReadStatus(accepted);
+        var claimMutation = new ClaimJob(Guid.NewGuid());
+        const string claims = WorkerContract.Route + "/claims";
+
+        using var edgeClaim = await caller.PostAsJsonAsync(claims, claimMutation);
+        using var workerRead = await primary.GetAsync($"{Sessions}/{session.SessionId}");
+        using var unrelatedLane = await third.PostAsJsonAsync(claims, claimMutation);
+        Assert.Equal(HttpStatusCode.Forbidden, edgeClaim.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, workerRead.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, unrelatedLane.StatusCode);
+
+        var parallel = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Claim(primary, claimMutation)));
+        var first = parallel[0];
+        Assert.All(parallel, claim => Assert.Equal(first, claim));
+        Assert.Equal(session.Jobs.Single(job => job.Lane == "primary").JobId, first.JobId);
+        var second = await Claim(secondary, claimMutation);
+        Assert.Equal(session.Jobs.Single(job => job.Lane == "secondary").JobId, second.JobId);
+        var firstPath = WorkerJobPath(first);
+        var secondPath = WorkerJobPath(second);
+        using var crossLane = await secondary.PostAsync($"{firstPath}/dispatch", null);
+        Assert.Equal(HttpStatusCode.NotFound, crossLane.StatusCode);
+        await fixture.StopAsync();
+
+        using var reconnected = await fixture.StartAsync("first");
+        using var primaryRestart = fixture.ConnectWorker("primary");
+        using var secondaryRestart = fixture.ConnectWorker("secondary");
+        Assert.Equal(first, await Claim(primaryRestart, claimMutation));
+        using var dispatch = await primaryRestart.PostAsync($"{firstPath}/dispatch", null);
+        var grant = await dispatch.Content.ReadFromJsonAsync<JobDispatch>();
+        Assert.Equal(HttpStatusCode.OK, dispatch.StatusCode);
+        Assert.Equal(first.Fence, grant?.Claim.Fence);
+        Assert.Equal(request.Task, grant?.Task);
+        using var repeatDispatch = await primaryRestart.PostAsync($"{firstPath}/dispatch", null);
+        Assert.Equal(grant, await repeatDispatch.Content.ReadFromJsonAsync<JobDispatch>());
+
+        fixture.SetPolicy("second");
+        using var revokedDispatch = await secondaryRestart.PostAsync($"{secondPath}/dispatch", null);
+        using var revokedReplay = await primaryRestart.PostAsync($"{firstPath}/dispatch", null);
+        Assert.Equal(HttpStatusCode.Forbidden, revokedDispatch.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, revokedReplay.StatusCode);
+        fixture.SetPolicy("first");
+
+        var cancel = new CancelSession(Guid.NewGuid());
+        var cancelPath = $"{Sessions}/{session.SessionId}/cancel";
+        using var cancelled = await reconnected.PostAsJsonAsync(cancelPath, cancel);
+        using var cancelReplay = await reconnected.PostAsJsonAsync(cancelPath, cancel);
+        var result = await ReadStatus(cancelled);
+        Assert.Equal(result.Jobs.ToArray(), (await ReadStatus(cancelReplay)).Jobs.ToArray());
+        Assert.Equal("dispatch-authorized", result.Jobs.Single(job => job.Lane == "primary").State);
+        Assert.Equal("cancelled", result.Jobs.Single(job => job.Lane == "secondary").State);
+        Assert.All(result.Jobs, job => Assert.True(job.CancellationRequested));
+        using var cannotDispatch = await secondaryRestart.PostAsync($"{secondPath}/dispatch", null);
+        Assert.Equal(HttpStatusCode.Conflict, cannotDispatch.StatusCode);
+        var observed = await primaryRestart.GetFromJsonAsync<JobClaim>(firstPath);
+        Assert.True(observed!.CancellationRequested);
+        await fixture.StopAsync();
+    }
+
+    private static async Task<JobClaim> Claim(HttpClient client, ClaimJob mutation)
+    {
+        using var response = await client.PostAsJsonAsync(WorkerContract.Route + "/claims", mutation);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return Assert.IsType<JobClaim>(await response.Content.ReadFromJsonAsync<JobClaim>());
+    }
+
+    private static string WorkerJobPath(JobClaim claim) =>
+        $"{WorkerContract.Route}/jobs/{claim.JobId}/claims/{claim.Fence}";
+
     private static async Task AssertDenied(HttpClient client, StartSession request, string status, string lookup)
     {
         using var start = await client.PostAsJsonAsync(Sessions, request);
@@ -182,6 +264,7 @@ public sealed class BrokerHttpTests
         private readonly X509Certificate2 edge = CreateCertificate("edge", "1.3.6.1.5.5.7.3.2");
         private readonly RSA signing = RSA.Create(2048);
         private readonly DiscoveryClock clock = new();
+        private readonly Dictionary<string, X509Certificate2> workers = new(StringComparer.Ordinal);
         private WebApplication? app;
         private int keyRequests;
 
@@ -194,7 +277,7 @@ public sealed class BrokerHttpTests
             File.WriteAllBytes(certificatePath, server.Export(X509ContentType.Pfx));
             var builder = WebApplication.CreateBuilder();
             builder.Logging.ClearProviders();
-            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            var settings = new Dictionary<string, string?>
             {
                 ["Broker:Authentication:Issuer"] = Issuer,
                 ["Broker:Authentication:Audience"] = Audience,
@@ -204,7 +287,14 @@ public sealed class BrokerHttpTests
                 ["Broker:PolicyFile"] = PolicyPath,
                 ["Kestrel:Endpoints:Fixture:Url"] = "https://127.0.0.1:0",
                 ["Kestrel:Certificates:Default:Path"] = certificatePath
-            });
+            };
+            foreach (var (lane, certificate) in workers)
+            {
+                settings[$"Broker:Workers:{lane}:Lane"] = lane;
+                settings[$"Broker:Workers:{lane}:CertificateSha256"] = certificate.GetCertHashString(HashAlgorithmName.SHA256);
+            }
+
+            builder.Configuration.AddInMemoryCollection(settings);
             builder.Services.AddSingleton<TimeProvider>(clock);
             builder.Services.Configure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme,
                 options => options.BackchannelHttpHandler = new DiscoveryHandler(this));
@@ -222,15 +312,22 @@ public sealed class BrokerHttpTests
             }
         }
 
-        public HttpClient Connect(string? token, bool useEdgeCertificate = true)
+        public void RegisterWorker(string lane) => workers.Add(lane, CreateCertificate(lane, "1.3.6.1.5.5.7.3.2"));
+
+        public HttpClient ConnectWorker(string lane) => Connect(null, workers[lane]);
+
+        public HttpClient Connect(string? token, bool useEdgeCertificate = true) =>
+            Connect(token, useEdgeCertificate ? edge : null);
+
+        private HttpClient Connect(string? token, X509Certificate2? certificate)
         {
             var handler = new HttpClientHandler
             {
                 ServerCertificateCustomValidationCallback = (_, cert, _, _) => server.Equals(cert)
             };
-            if (useEdgeCertificate)
+            if (certificate is not null)
             {
-                handler.ClientCertificates.Add(edge);
+                handler.ClientCertificates.Add(certificate);
             }
 
             var client = new HttpClient(handler) { BaseAddress = new Uri(app!.Urls.Single()), Timeout = TimeSpan.FromSeconds(15) };
@@ -266,7 +363,7 @@ public sealed class BrokerHttpTests
                 id = name,
                 identities = new[] { new { issuer = Issuer, subject = name } },
                 grants = lanes.Select(lane =>
-                    new { project = "demo", lane, actions = new[] { "start", "read" } })
+                    new { project = "demo", lane, actions = new[] { "start", "read", "cancel" } })
             })
         }));
 
@@ -289,6 +386,10 @@ public sealed class BrokerHttpTests
             StopAsync().GetAwaiter().GetResult();
             signing.Dispose();
             edge.Dispose();
+            foreach (var certificate in workers.Values)
+            {
+                certificate.Dispose();
+            }
             server.Dispose();
             directory.Delete(recursive: true);
         }
@@ -299,7 +400,17 @@ public sealed class BrokerHttpTests
             var request = new CertificateRequest($"CN={name}", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
             request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
             request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new(usage) }, false));
-            return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+            using var generated = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+            var pfx = generated.Export(X509ContentType.Pfx);
+            try
+            {
+                // Schannel needs the client private key to be accessible through the Windows key store.
+                return X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.UserKeySet);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(pfx);
+            }
         }
 
         private sealed class DiscoveryClock : TimeProvider

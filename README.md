@@ -75,5 +75,29 @@ independent session ownership.
 - `GET /v1/sessions?project=demo&limit=20` lists authorized sessions. Pass the
   returned `nextAfter` as `after` to continue.
 
-The broker currently persists jobs in the queued state. Worker dispatch and MCP
+The broker initially persists jobs in the queued state. Runtime dispatch and MCP
 integration remain tracked in the feature plans.
+
+### Worker claims and cancellation
+
+Register each worker by its stable ID with `Broker__Workers__<id>__Lane` and
+`Broker__Workers__<id>__CertificateSha256`. Each worker presents its own
+certificate on the private HTTPS endpoint. The broker checks the worker
+and lane against each claim. Keep the worker ID and its durable local state
+together across restarts.
+
+- `POST /v1/worker/claims` accepts a persisted `mutationId` and returns a
+  lane-bound job and fence, or 204 when no eligible job is queued. Retrying
+  a successful claim returns that same job and fence.
+- `POST /v1/worker/jobs/{jobId}/claims/{fence}/dispatch` authorizes dispatch
+  and returns the task after checking current admission grants. Repeating the
+  call retains the same job and fence. The worker reconciles runtime execution
+  against that durable identity.
+- `GET /v1/worker/jobs/{jobId}/claims/{fence}` reads the claim and cancellation
+  intent for that worker.
+- `POST /v1/sessions/{sessionId}/cancel` requires `read` and `cancel` grants
+  for every child lane and takes a `mutationId`. Cancellation closes pending
+  jobs immediately. When dispatch authorization wins first, the job retains
+  its state with cancellation intent until runtime evidence arrives.
+
+Each project admits up to 256 sessions with pending or authorized work.
