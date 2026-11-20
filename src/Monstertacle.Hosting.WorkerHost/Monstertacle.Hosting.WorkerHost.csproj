@@ -8,6 +8,8 @@
     <PackageReference Include="Monstertacle.Multisession.Storage.Sqlite" Version="$(MultisessionVersion)" />
     <PackageReference Include="Monstertacle.Multisession.Linux" Version="$(MultisessionVersion)" Condition="'$(TargetFramework)' == 'net11.0'" />
     <PackageReference Include="Monstertacle.Multisession.Windows" Version="$(MultisessionVersion)" Condition="'$(TargetFramework)' == 'net11.0-windows'" />
+    <ProjectReference Include="../Monstertacle.Hosting.Contracts/Monstertacle.Hosting.Contracts.csproj" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
     <InternalsVisibleTo Include="Monstertacle.Hosting.Tests" />
   </ItemGroup>
 </Project>

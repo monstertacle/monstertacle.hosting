@@ -134,5 +134,17 @@ stable nonempty UUID. Keep the state directory and trust scope together across
 restarts. The runtime creates the directory on its initial start and opens the
 existing native-lease-protected store thereafter.
 
-The current WorkerHost starts the embedded runtime and exposes liveness.
-Broker polling and dispatch remain tracked in the coordination plan.
+
+Set `Worker__Profile` to `deterministic-primary` or `deterministic-secondary` for
+credential-free execution. Set `Worker__BrokerUrl` to the private HTTPS origin,
+`Worker__BrokerClientCertificateFile` to its PKCS#12 client certificate, and
+`Worker__BrokerClientCertificatePassword` if needed. The broker must register
+the certificate on the worker's lane. The worker must trust the broker's server
+certificate.
+
+A worker holds one durable assignment at a time. The broker job ID is the
+runtime session ID, and the broker fence is the runtime request ID. On restart
+the worker reads its assignment and checks for the original runtime request
+before submitting anything. Broker status distinguishes cancellation intent,
+unsupported cancellation, and confirmed execution outcomes. An uncertain
+execution retains its assignment pending recovery evidence.

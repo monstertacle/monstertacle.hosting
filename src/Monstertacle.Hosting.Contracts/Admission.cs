@@ -67,6 +67,7 @@ public sealed record SessionStatus(
     DateTimeOffset ObservedUtc,
     IReadOnlyList<JobStatus> Jobs);
 
-public sealed record JobStatus(Guid JobId, string Lane, string State, bool CancellationRequested = false);
+public sealed record JobStatus(Guid JobId, string Lane, string State, bool CancellationRequested = false,
+    string? ExecutionCertainty = null, bool CancellationUnsupported = false);
 
 public sealed record SessionPage(IReadOnlyList<SessionStatus> Sessions, Guid? NextAfter);

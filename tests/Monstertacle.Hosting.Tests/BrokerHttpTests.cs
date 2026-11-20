@@ -17,6 +17,8 @@ using ModelContextProtocol.Client;
 using Monstertacle.Hosting.Contracts;
 using Monstertacle.Hosting.ControlPlane;
 using Monstertacle.Hosting.McpHost;
+using Monstertacle.Hosting.WorkerHost;
+using Monstertacle.Multisession.Contracts;
 
 namespace Monstertacle.Hosting.Tests;
 
@@ -232,6 +234,18 @@ public sealed class BrokerHttpTests
         Assert.Equal(HttpStatusCode.Conflict, cannotDispatch.StatusCode);
         var observed = await primaryRestart.GetFromJsonAsync<JobClaim>(firstPath);
         Assert.True(observed!.CancellationRequested);
+        var running = new JobObservation("running", "in-progress", true);
+        using var reportedRunning = await primaryRestart.PostAsJsonAsync($"{firstPath}/observation", running);
+        Assert.Equal(HttpStatusCode.NoContent, reportedRunning.StatusCode);
+        var unresolved = new JobObservation("interrupted", "unknown", true);
+        using var reportedUncertainty = await primaryRestart.PostAsJsonAsync($"{firstPath}/observation", unresolved);
+        Assert.Equal(HttpStatusCode.NoContent, reportedUncertainty.StatusCode);
+        using var invalidRegression = await primaryRestart.PostAsJsonAsync($"{firstPath}/observation", running);
+        Assert.Equal(HttpStatusCode.Conflict, invalidRegression.StatusCode);
+        var unresolvedStatus = await reconnected.GetFromJsonAsync<SessionStatus>($"{Sessions}/{session.SessionId}");
+        var active = unresolvedStatus!.Jobs.Single(job => job.JobId == first.JobId);
+        Assert.True(active.CancellationUnsupported);
+        Assert.Equal("unknown", active.ExecutionCertainty);
         await fixture.StopAsync();
     }
 
@@ -244,6 +258,82 @@ public sealed class BrokerHttpTests
 
     private static string WorkerJobPath(JobClaim claim) =>
         $"{WorkerContract.Route}/jobs/{claim.JobId}/claims/{claim.Fence}";
+
+    [Fact]
+    public async Task WorkerRecoversLostClaimAndTerminalResponseWithoutAnotherRuntimeRequest()
+    {
+        using var fixture = new BrokerFixture();
+        fixture.SetPolicy("first");
+        fixture.RegisterWorker("primary");
+        using var caller = await fixture.StartAsync("first");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        var ct = timeout.Token;
+        using var start = await caller.PostAsJsonAsync(Sessions, new StartSession(Guid.NewGuid(), "demo", "fixture"), ct);
+        var admitted = await ReadStatus(start);
+        var primary = admitted.Jobs.Single(job => job.Lane == "primary");
+        var directory = fixture.WorkerDirectory;
+        var trust = Guid.NewGuid();
+        var binding = DeterministicProvider.Bind("fixture");
+        Guid fence;
+        using (var reconnect = fixture.ConnectWorker("primary",
+            handler => new LoseResponse(new LoseResponse(handler, "/dispatch"), "/claims")))
+        await using (var runtime = await WorkerRuntime.OpenAsync(directory, trust, [binding.Registration], [binding.Profile], ct))
+        {
+            var ledger = new WorkerLedger(directory);
+            var initial = ledger.Read().Mutation;
+            var worker = new WorkerDispatch(ledger, new WorkerBrokerClient(reconnect), runtime, "fixture", false);
+            await Assert.ThrowsAsync<HttpRequestException>(() => worker.PollAsync(ct));
+            Assert.Equal((initial, null), ledger.Read());
+            await Assert.ThrowsAsync<HttpRequestException>(() => worker.PollAsync(ct));
+            var attached = ledger.Read().Claim!;
+            Assert.Equal(primary.JobId, attached.JobId);
+            Assert.Null(await runtime.Requests.GetRequestAsync(attached.Fence, ct));
+            fence = attached.Fence;
+            await worker.PollAsync(ct);
+
+            while ((await runtime.Requests.GetRequestAsync(fence, ct))?.State != RequestState.Succeeded)
+            {
+                await Task.Delay(20, ct);
+            }
+        }
+
+        using var resumed = fixture.ConnectWorker("primary", handler => new LoseResponse(handler, "/observation"));
+        await using var reopened = await WorkerRuntime.OpenAsync(directory, trust, [binding.Registration], [binding.Profile], ct);
+        var recoveredLedger = new WorkerLedger(directory);
+        Assert.Equal(fence, recoveredLedger.Read().Claim?.Fence);
+        var resumedWorker = new WorkerDispatch(recoveredLedger, new WorkerBrokerClient(resumed), reopened, "fixture", false);
+        await Assert.ThrowsAsync<HttpRequestException>(() => resumedWorker.PollAsync(ct));
+        Assert.Equal(fence, recoveredLedger.Read().Claim?.Fence);
+        await resumedWorker.PollAsync(ct);
+        Assert.Null(recoveredLedger.Read().Claim);
+
+        var status = await caller.GetFromJsonAsync<SessionStatus>($"{Sessions}/{admitted.SessionId}", ct);
+        var completed = status!.Jobs.Single(job => job.JobId == primary.JobId);
+        Assert.Equal("succeeded", completed.State);
+        Assert.Equal("confirmed-ended", completed.ExecutionCertainty);
+        var requests = await reopened.Requests.ListRequestsAsync(primary.JobId, 2, null, ct);
+        Assert.Equal(fence, Assert.Single(requests.Items).RequestId);
+        Assert.Null(requests.NextCursor);
+    }
+
+    private sealed class LoseResponse(HttpMessageHandler inner, string pathSuffix) : DelegatingHandler(inner)
+    {
+        private int dropped;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            var response = await base.SendAsync(request, token);
+            if (response.IsSuccessStatusCode &&
+                request.RequestUri?.AbsolutePath.EndsWith(pathSuffix, StringComparison.Ordinal) == true &&
+                Interlocked.Exchange(ref dropped, 1) == 0)
+            {
+                response.Dispose();
+                throw new HttpRequestException("Fixture dropped a successful response.");
+            }
+
+            return response;
+        }
+    }
 
     [Fact]
     public async Task FreshMcpClientRecoversSessionAndBrokerRejectsStaleEdgeGrants()
@@ -350,6 +440,7 @@ public sealed class BrokerHttpTests
 
         public string MetadataIssuer { get; set; } = Issuer;
         public int KeyRequests => Volatile.Read(ref keyRequests);
+        public string WorkerDirectory => Path.Combine(directory.FullName, "worker");
 
         public async Task<HttpClient> StartAsync(string subject)
         {
@@ -427,7 +518,8 @@ public sealed class BrokerHttpTests
 
         public void RegisterWorker(string lane) => workers.Add(lane, CreateCertificate(lane, "1.3.6.1.5.5.7.3.2"));
 
-        public HttpClient ConnectWorker(string lane) => Connect(null, workers[lane]);
+        public HttpClient ConnectWorker(string lane, Func<HttpMessageHandler, HttpMessageHandler>? wrap = null) =>
+            Connect(new Uri(app!.Urls.Single()), null, workers[lane], wrap);
 
         public HttpClient Connect(string? token, bool useEdgeCertificate = true) =>
             Connect(token, useEdgeCertificate ? edge : null);
@@ -435,7 +527,8 @@ public sealed class BrokerHttpTests
         private HttpClient Connect(string? token, X509Certificate2? certificate) =>
             Connect(new Uri(app!.Urls.Single()), token, certificate);
 
-        private HttpClient Connect(Uri endpoint, string? token, X509Certificate2? certificate)
+        private HttpClient Connect(Uri endpoint, string? token, X509Certificate2? certificate,
+            Func<HttpMessageHandler, HttpMessageHandler>? wrap = null)
         {
             var handler = new HttpClientHandler
             {
@@ -446,7 +539,7 @@ public sealed class BrokerHttpTests
                 handler.ClientCertificates.Add(certificate);
             }
 
-            var client = new HttpClient(handler) { BaseAddress = endpoint, Timeout = TimeSpan.FromSeconds(15) };
+            var client = new HttpClient(wrap?.Invoke(handler) ?? handler) { BaseAddress = endpoint, Timeout = TimeSpan.FromSeconds(15) };
             if (token is not null)
             {
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);

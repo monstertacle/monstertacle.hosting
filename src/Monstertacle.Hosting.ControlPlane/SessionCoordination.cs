@@ -11,7 +11,7 @@ internal sealed partial class SessionStore
 {
     private const string WorkerProjection = """
         SELECT j.id, j.session_id, j.fence, j.lane, j.state, j.cancel_requested,
-               s.project, s.task, s.principal, s.issuer, s.subject
+               s.project, s.task, s.principal, s.issuer, s.subject, j.execution_certainty, j.cancel_unsupported
         FROM jobs j JOIN sessions s ON s.id = j.session_id
         """;
 
@@ -144,7 +144,8 @@ internal sealed partial class SessionStore
             UPDATE jobs
             SET state = CASE WHEN state IN ('queued', 'claimed') THEN 'cancelled' ELSE state END,
                 cancel_requested = 1
-            WHERE session_id = $id AND state IN ('queued', 'claimed', 'dispatch-authorized');
+            WHERE session_id = $id AND (state IN ('queued', 'claimed', 'dispatch-authorized', 'running')
+                OR execution_certainty = 'unknown');
             """, ("$id", sessionId.ToString("D")), ("$principal", access.Principal), ("$project", session.Project),
             ("$mutation", mutation.ToString("D")));
         cancel.ExecuteNonQuery();
@@ -179,12 +180,51 @@ internal sealed partial class SessionStore
 
         var claim = new JobClaim(Guid.ParseExact(row.GetString(0), "D"), Guid.ParseExact(row.GetString(1), "D"),
             Guid.ParseExact(row.GetString(2), "D"), row.GetString(3), row.GetString(4), row.GetBoolean(5));
-        return new(claim, row.GetString(6), row.GetString(7), row.GetString(8), new(row.GetString(9), row.GetString(10)));
+        return new(claim, row.GetString(6), row.GetString(7), row.GetString(8), new(row.GetString(9), row.GetString(10)),
+            row.IsDBNull(11) ? null : row.GetString(11), row.GetBoolean(12));
     }
 
-    private sealed record WorkerJob(JobClaim Claim, string Project, string Task, string Principal, BrokerPolicy.Identity Identity);
+    public ObservationOutcome RecordObservation(Worker worker, Guid jobId, Guid fence, JobObservation observation)
+    {
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction(deferred: false);
+        var job = FindClaim(connection, transaction, worker, jobId, fence);
+        if (job is null)
+        {
+            return ObservationOutcome.Missing;
+        }
+
+        if (job.Claim.State == observation.State && job.Certainty == observation.Certainty &&
+            job.CancellationUnsupported == observation.CancellationUnsupported)
+        {
+            return ObservationOutcome.Accepted;
+        }
+
+        var refinesUncertainty = job.Certainty == "unknown" && observation.Certainty == "confirmed-ended" &&
+            job.Claim.State == observation.State;
+        if ((job.Claim.State is not ("dispatch-authorized" or "running") && !refinesUncertainty) ||
+            (job.Claim.State == "running" && observation.Certainty == "not-started") ||
+            (observation.CancellationUnsupported && !job.Claim.CancellationRequested) ||
+            (job.CancellationUnsupported && !observation.CancellationUnsupported))
+        {
+            return ObservationOutcome.Conflict;
+        }
+
+        using var update = Command(connection, transaction, """
+            UPDATE jobs SET state = $state, execution_certainty = $certainty, cancel_unsupported = $unsupported
+            WHERE id = $id;
+            """, ("$state", observation.State), ("$certainty", observation.Certainty),
+            ("$unsupported", observation.CancellationUnsupported), ("$id", jobId.ToString("D")));
+        update.ExecuteNonQuery();
+        transaction.Commit();
+        return ObservationOutcome.Accepted;
+    }
+
+    private sealed record WorkerJob(JobClaim Claim, string Project, string Task, string Principal,
+        BrokerPolicy.Identity Identity, string? Certainty, bool CancellationUnsupported);
     public sealed record DispatchDecision(DispatchOutcome Outcome, JobDispatch? Dispatch = null);
     public enum DispatchOutcome { Authorized, Missing, Denied, Unavailable }
     public sealed record Cancellation(CancelOutcome Outcome, SessionStatus? Session = null);
     public enum CancelOutcome { Accepted, Conflict, Missing }
+    public enum ObservationOutcome { Accepted, Conflict, Missing }
 }

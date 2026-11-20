@@ -9,7 +9,8 @@ namespace Monstertacle.Hosting.ControlPlane;
 internal sealed partial class SessionStore
 {
     private const string Projection = """
-        SELECT s.id, s.project, s.admitted_utc, s.payload_digest, j.id, j.lane, j.state, j.cancel_requested
+        SELECT s.id, s.project, s.admitted_utc, s.payload_digest, j.id, j.lane, j.state, j.cancel_requested,
+               j.execution_certainty, j.cancel_unsupported
         FROM sessions s JOIN jobs j ON j.session_id = s.id
         """;
 
@@ -45,6 +46,7 @@ internal sealed partial class SessionStore
         var schemaVersion = (long)version.ExecuteScalar()!;
         switch (schemaVersion)
         {
+            case 3L:
             case 2L:
             case 1L:
                 break;
@@ -103,6 +105,16 @@ internal sealed partial class SessionStore
             upgrade.ExecuteNonQuery();
         }
 
+        if (schemaVersion < 3L)
+        {
+            using var upgrade = Command(connection, transaction, """
+                ALTER TABLE jobs ADD COLUMN execution_certainty TEXT;
+                ALTER TABLE jobs ADD COLUMN cancel_unsupported INTEGER NOT NULL DEFAULT 0;
+                PRAGMA user_version = 3;
+                """);
+            upgrade.ExecuteNonQuery();
+        }
+
         transaction.Commit();
     }
 
@@ -140,7 +152,7 @@ internal sealed partial class SessionStore
             SELECT COUNT(*) FROM sessions AS s
             WHERE s.project = $project AND EXISTS (
                 SELECT 1 FROM jobs j WHERE j.session_id = s.id
-                AND j.state IN ('queued', 'claimed', 'dispatch-authorized')
+                AND (j.state IN ('queued', 'claimed', 'dispatch-authorized', 'running') OR j.execution_certainty = 'unknown')
             );
             """, ("$project", request.Project)))
         {
@@ -281,7 +293,8 @@ internal sealed partial class SessionStore
                 entries.Add(current);
             }
 
-            current.Jobs.Add(new(Guid.ParseExact(reader.GetString(4), "D"), reader.GetString(5), reader.GetString(6), reader.GetBoolean(7)));
+            current.Jobs.Add(new(Guid.ParseExact(reader.GetString(4), "D"), reader.GetString(5), reader.GetString(6),
+                reader.GetBoolean(7), reader.IsDBNull(8) ? null : reader.GetString(8), reader.GetBoolean(9)));
         }
 
         return entries;

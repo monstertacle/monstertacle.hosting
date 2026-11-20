@@ -101,6 +101,21 @@ public static class BrokerApplication
                 { Outcome: SessionStore.DispatchOutcome.Unavailable } => Results.Conflict(),
                 _ => Results.NotFound()
             });
+        workers.MapPost("/jobs/{jobId:guid}/claims/{fence:guid}/observation", (Guid jobId, Guid fence,
+            JobObservation observation, HttpContext context, SessionStore store) =>
+            {
+                if (!observation.IsValid())
+                {
+                    return Results.BadRequest();
+                }
+
+                return store.RecordObservation(CurrentWorker(context), jobId, fence, observation) switch
+                {
+                    SessionStore.ObservationOutcome.Accepted => Results.NoContent(),
+                    SessionStore.ObservationOutcome.Conflict => Results.Conflict(),
+                    _ => Results.NotFound()
+                };
+            });
 
         return app;
     }
