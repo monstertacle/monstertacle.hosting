@@ -148,3 +148,31 @@ the worker reads its assignment and checks for the original runtime request
 before submitting anything. Broker status distinguishes cancellation intent,
 unsupported cancellation, and confirmed execution outcomes. An uncertain
 execution retains its assignment pending recovery evidence.
+
+#### Deployment-owned agents
+
+For an AgentFramework deployment, reference the WorkerHost project from a
+.NET 11 composition root. Create the agent with deployment-injected
+credentials and register a factory with a stable agent and adapter identity.
+The deployment sets `Worker__Profile` to the registered profile ID.
+
+```csharp
+using Monstertacle.Hosting.WorkerHost;
+using Monstertacle.Multisession.AgentFramework;
+
+var registration = WorkerRegistration.AgentFramework(
+    profileId: "service-profile",
+    providerId: "configured-connection",
+    modelId: configuredModelId,
+    settingsRevision: "1",
+    options: new FrameworkAgentOptions { AdapterId = "service-agent-v1" },
+    agentFactory: _ => configuredAgent);
+
+await WorkerApplication.RunAsync(builder, [registration]);
+```
+
+Here `configuredAgent` is a deployment-owned `AIAgent` created by the same
+composition root. Keep its ID and serialization contract stable across worker
+restarts. Task input cannot select the agent, profile, model or credentials.
+The offline suite executes this registration with a deterministic chat client
+through two worker lanes. Live agent qualification requires deployment inputs.

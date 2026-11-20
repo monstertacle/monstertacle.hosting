@@ -6,9 +6,11 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
+using Microsoft.Agents.AI;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Logging;
@@ -260,11 +262,12 @@ public sealed class BrokerHttpTests
         $"{WorkerContract.Route}/jobs/{claim.JobId}/claims/{claim.Fence}";
 
     [Fact]
-    public async Task WorkerRecoversLostClaimAndTerminalResponseWithoutAnotherRuntimeRequest()
+    public async Task TwoWorkersCompleteAndRecoverLostResponsesWithoutDuplicateExecution()
     {
         using var fixture = new BrokerFixture();
         fixture.SetPolicy("first");
         fixture.RegisterWorker("primary");
+        fixture.RegisterWorker("secondary");
         using var caller = await fixture.StartAsync("first");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
         var ct = timeout.Token;
@@ -273,11 +276,17 @@ public sealed class BrokerHttpTests
         var primary = admitted.Jobs.Single(job => job.Lane == "primary");
         var directory = fixture.WorkerDirectory;
         var trust = Guid.NewGuid();
-        var binding = DeterministicProvider.Bind("fixture");
+        using var chat = new FixtureChatClient();
+        var agent = new ChatClientAgent(chat, new ChatClientAgentOptions { Id = "fixture-agent", Name = "fixture" });
+        var registration = WorkerRegistration.AgentFramework("fixture", "fixture-provider", "fixture-model", "1",
+            new() { AdapterId = "fixture-adapter" }, _ => agent);
+        var binding = WorkerApplication.SelectRegistration("fixture", [registration]);
+        Assert.Same(registration, binding);
+        Assert.Throws<InvalidOperationException>(() => WorkerApplication.SelectRegistration("unregistered", [registration]));
         Guid fence;
         using (var reconnect = fixture.ConnectWorker("primary",
             handler => new LoseResponse(new LoseResponse(handler, "/dispatch"), "/claims")))
-        await using (var runtime = await WorkerRuntime.OpenAsync(directory, trust, [binding.Registration], [binding.Profile], ct))
+        await using (var runtime = await WorkerRuntime.OpenAsync(directory, trust, [binding.Provider], [binding.Profile], ct))
         {
             var ledger = new WorkerLedger(directory);
             var initial = ledger.Read().Mutation;
@@ -298,7 +307,7 @@ public sealed class BrokerHttpTests
         }
 
         using var resumed = fixture.ConnectWorker("primary", handler => new LoseResponse(handler, "/observation"));
-        await using var reopened = await WorkerRuntime.OpenAsync(directory, trust, [binding.Registration], [binding.Profile], ct);
+        await using var reopened = await WorkerRuntime.OpenAsync(directory, trust, [binding.Provider], [binding.Profile], ct);
         var recoveredLedger = new WorkerLedger(directory);
         Assert.Equal(fence, recoveredLedger.Read().Claim?.Fence);
         var resumedWorker = new WorkerDispatch(recoveredLedger, new WorkerBrokerClient(resumed), reopened, "fixture", false);
@@ -307,13 +316,59 @@ public sealed class BrokerHttpTests
         await resumedWorker.PollAsync(ct);
         Assert.Null(recoveredLedger.Read().Claim);
 
+        using var secondaryClient = fixture.ConnectWorker("secondary");
+        var secondaryDirectory = directory + "-secondary";
+        await using var secondaryRuntime = await WorkerRuntime.OpenAsync(secondaryDirectory, Guid.NewGuid(),
+            [binding.Provider], [binding.Profile], ct);
+        var secondaryLedger = new WorkerLedger(secondaryDirectory);
+        var secondaryWorker = new WorkerDispatch(secondaryLedger, new WorkerBrokerClient(secondaryClient),
+            secondaryRuntime, "fixture", false);
+        await secondaryWorker.PollAsync(ct);
+        var secondaryClaim = secondaryLedger.Read().Claim!;
+        Assert.Equal(admitted.Jobs.Single(job => job.Lane == "secondary").JobId, secondaryClaim.JobId);
+        while (secondaryLedger.Read().Claim is not null)
+        {
+            await secondaryWorker.PollAsync(ct);
+            await Task.Delay(20, ct);
+        }
+
         var status = await caller.GetFromJsonAsync<SessionStatus>($"{Sessions}/{admitted.SessionId}", ct);
+        Assert.All(status!.Jobs, job => Assert.Equal("succeeded", job.State));
         var completed = status!.Jobs.Single(job => job.JobId == primary.JobId);
         Assert.Equal("succeeded", completed.State);
         Assert.Equal("confirmed-ended", completed.ExecutionCertainty);
         var requests = await reopened.Requests.ListRequestsAsync(primary.JobId, 2, null, ct);
-        Assert.Equal(fence, Assert.Single(requests.Items).RequestId);
+        var receipt = Assert.Single(requests.Items);
+        Assert.Equal(fence, receipt.RequestId);
+        Assert.Equal("fixture output", receipt.Result?.Output);
+        Assert.Equal(2, chat.Calls);
         Assert.Null(requests.NextCursor);
+    }
+
+    private sealed class FixtureChatClient : IChatClient
+    {
+        private int calls;
+        public int Calls => Volatile.Read(ref calls);
+
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Assert.Contains(messages, message => message.Role == ChatRole.User && message.Text == "fixture");
+            Interlocked.Increment(ref calls);
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "fixture output"))
+            {
+                FinishReason = ChatFinishReason.Stop
+            });
+        }
+
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public object? GetService(Type serviceType, object? serviceKey = null) =>
+            serviceKey is null && serviceType.IsInstanceOfType(this) ? this : null;
+
+        public void Dispose() { }
     }
 
     private sealed class LoseResponse(HttpMessageHandler inner, string pathSuffix) : DelegatingHandler(inner)

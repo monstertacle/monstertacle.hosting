@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Monstertacle.Multisession.Common" Version="$(MultisessionVersion)" />
+    <PackageReference Include="Monstertacle.Multisession.AgentFramework" Version="$(MultisessionVersion)" />
     <PackageReference Include="Monstertacle.Multisession.Storage.Sqlite" Version="$(MultisessionVersion)" />
     <PackageReference Include="Monstertacle.Multisession.Linux" Version="$(MultisessionVersion)" Condition="'$(TargetFramework)' == 'net11.0'" />
     <PackageReference Include="Monstertacle.Multisession.Windows" Version="$(MultisessionVersion)" Condition="'$(TargetFramework)' == 'net11.0-windows'" />

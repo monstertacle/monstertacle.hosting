@@ -7,6 +7,6 @@
 - [ ] T204 Add authorized aggregate, bounded artifact read and digest acceptance
   to private HTTP and MCP tools.
 - [ ] T205 Verify malformed evidence, tampering, partial results and revocation.
-- [ ] T206 Compose a deployment-configured AgentFramework adapter path and
+- [x] T206 Compose a deployment-configured AgentFramework adapter path and
   verify the registration without live credentials. Qualify a real deployment
   separately with authorized provider settings.
