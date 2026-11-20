@@ -1,0 +1,17 @@
+**
+!global.json
+!Directory.Build.props
+!LICENSE
+!THIRD-PARTY-NOTICES.md
+!src/
+!src/**/*.cs
+!src/**/*.csproj
+!dependencies/
+!dependencies/communication/
+!dependencies/communication/LICENSE
+!dependencies/communication/src/
+!dependencies/communication/src/Monstertacle.Communication.Mcp/
+!dependencies/communication/src/Monstertacle.Communication.Mcp/*.cs
+!dependencies/communication/src/Monstertacle.Communication.Mcp/*.csproj
+**/bin/
+**/obj/

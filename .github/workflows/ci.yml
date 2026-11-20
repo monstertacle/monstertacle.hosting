@@ -22,3 +22,12 @@ jobs:
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release
       - run: dotnet test --no-build -c Release
+
+  linux-containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - run: bash deploy/smoke.sh

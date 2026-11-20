@@ -198,3 +198,8 @@ accept a result. The broker validates current `read`, `result` and
 `accept-result` grants for every lane and verifies stored artifact bytes
 before returning a receipt, including on retry. Reading a result does not
 create an acceptance receipt.
+
+## Deployment
+
+See the [deployment guide](deploy/README.md) for .NET 11 images, Docker Compose,
+rootless Podman Quadlet, and the separate live acceptance procedure.

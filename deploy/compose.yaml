@@ -1,0 +1,71 @@
+x-service: &service
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
+services:
+  broker:
+    <<: *service
+    build:
+      context: ..
+      target: control-plane
+    image: localhost/monstertacle-hosting-control-plane:local
+    env_file: "${HOSTING_CONFIG_DIR:?Set HOSTING_CONFIG_DIR}/broker.env"
+    environment:
+      Kestrel__Endpoints__Broker__Url: https://+:8443
+      Kestrel__Endpoints__Broker__Certificate__Path: /run/hosting/server.pfx
+      Broker__DatabaseFile: /var/lib/hosting/broker.db
+      Broker__PolicyFile: /run/hosting/policy.json
+    volumes:
+      - "${HOSTING_CONFIG_DIR}/broker:/run/hosting:ro"
+      - broker-state:/var/lib/hosting
+    networks: [private, outbound]
+
+  worker:
+    <<: *service
+    build:
+      context: ..
+      target: worker-host
+    image: localhost/monstertacle-hosting-worker-host:local
+    env_file: "${HOSTING_CONFIG_DIR:?Set HOSTING_CONFIG_DIR}/worker.env"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      Worker__BrokerUrl: https://broker:8443
+      Worker__BrokerClientCertificateFile: /run/hosting/client.pfx
+      Worker__StateDirectory: /var/lib/hosting/runtime
+      Worker__Runtime: deterministic
+    volumes:
+      - "${HOSTING_CONFIG_DIR}/worker:/run/hosting:ro"
+      - worker-state:/var/lib/hosting
+    networks: [private]
+    depends_on: [broker]
+
+  edge:
+    <<: *service
+    build:
+      context: ..
+      target: mcp-host
+    image: localhost/monstertacle-hosting-mcp-host:local
+    env_file: "${HOSTING_CONFIG_DIR:?Set HOSTING_CONFIG_DIR}/edge.env"
+    environment:
+      Kestrel__Endpoints__Edge__Url: https://+:8443
+      Kestrel__Endpoints__Edge__Certificate__Path: /run/hosting/server.pfx
+      Mcp__BrokerUrl: https://broker:8443
+      Mcp__BrokerClientCertificateFile: /run/hosting/client.pfx
+      Mcp__PolicyFile: /run/hosting/policy.json
+    volumes:
+      - "${HOSTING_CONFIG_DIR}/edge:/run/hosting:ro"
+    networks: [private, outbound]
+    depends_on: [broker]
+    ports:
+      - "127.0.0.1:${HOSTING_EDGE_PORT:-8443}:8443"
+
+networks:
+  private:
+    internal: true
+  outbound:
+
+volumes:
+  broker-state:
+  worker-state:
