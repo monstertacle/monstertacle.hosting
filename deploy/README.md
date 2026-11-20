@@ -113,3 +113,8 @@ OAuth flow.
 Record platform, exact revision, client types, scenario outcome and deployment
 prerequisites separately from offline evidence. Live validation requires the
 deployment inputs above.
+
+The rootless smoke variant, `bash deploy/smoke.sh --quadlet`, builds and
+starts the sample units under a disposable user's systemd manager. It requires
+working rootless Podman, an active user manager, and unused example unit and
+volume names. Hosted CI runs it in an isolated Linux runner.

@@ -10,16 +10,22 @@ export HOSTING_CONFIG_DIR="$scratch/config"
 export HOSTING_EDGE_PORT="${HOSTING_EDGE_PORT:-28443}"
 compose=(docker compose --project-name "$project" --file "$repo/deploy/compose.yaml")
 started=false
+quadlet_units=""
+mode=${1:-}
 cleanup() {
-    if [[ "$started" == true ]]; then
+    if [[ -n "$quadlet_units" ]]; then
+        systemctl --user stop hosting-edge.service hosting-worker.service hosting-broker.service >&2 || true
+        find "$quadlet_units" -depth -delete
+        systemctl --user daemon-reload
+    elif [[ "$started" == true ]]; then
         "${compose[@]}" down --volumes --remove-orphans >&2
     fi
     find "$scratch" -depth -delete
 }
 trap cleanup EXIT
 
-if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--config-only" ) ]]; then
-    printf 'Usage: %s [--config-only]\n' "$0" >&2
+if [[ $# -gt 1 || ( -n "$mode" && "$mode" != "--config-only" && "$mode" != "--quadlet" ) ]]; then
+    printf 'Usage: %s [--config-only|--quadlet]\n' "$0" >&2
     exit 2
 fi
 
@@ -27,8 +33,10 @@ mkdir -p "$HOSTING_CONFIG_DIR"/{broker,worker,edge}
 for name in broker worker edge; do
     touch "$HOSTING_CONFIG_DIR/$name.env"
 done
-"${compose[@]}" config --quiet
-if [[ $# -eq 1 ]]; then
+if [[ "$mode" != "--quadlet" ]]; then
+    "${compose[@]}" config --quiet
+fi
+if [[ "$mode" == "--config-only" ]]; then
     exit 0
 fi
 
@@ -82,23 +90,63 @@ Worker__TrustScope=a0b6e647-964f-4370-a53b-4963dc3ca007
 SSL_CERT_FILE=/run/hosting/ca.pem
 EOF_ENV
 
-"${compose[@]}" build
-started=true
-"${compose[@]}" up --detach
+if [[ "$mode" == "--quadlet" ]]; then
+    test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+    systemctl --user show-environment >/dev/null
+    for unit in hosting-broker hosting-worker hosting-edge; do
+        if [[ $(systemctl --user show -p LoadState --value "$unit.service") != not-found ]] ||
+            podman container exists "systemd-$unit"; then
+            printf 'Quadlet smoke requires an unused unit and container name: %s\n' "$unit" >&2
+            exit 1
+        fi
+    done
+    for state in broker worker; do
+        if podman volume exists "systemd-hosting-$state-state"; then
+            printf 'Quadlet smoke requires an unused volume: %s\n' "$state" >&2
+            exit 1
+        fi
+    done
+    for target in control-plane worker-host mcp-host; do
+        podman build --target "$target" -t "localhost/monstertacle-hosting-$target:local" "$repo"
+    done
+    mkdir -p "${XDG_RUNTIME_DIR:?Set XDG_RUNTIME_DIR}/containers/systemd"
+    quadlet_units=$(mktemp -d "$XDG_RUNTIME_DIR/containers/systemd/hosting-smoke.XXXXXXXX")
+    for unit in "$repo"/deploy/quadlet/*; do
+        sed -e "s|%h/\.config/monstertacle-hosting|$HOSTING_CONFIG_DIR|g" \
+            -e "s|^PublishPort=127\.0\.0\.1:8443:8443$|PublishPort=127.0.0.1:$HOSTING_EDGE_PORT:8443|" \
+            "$unit" > "$quadlet_units/${unit##*/}"
+    done
+    systemctl --user daemon-reload
+    systemctl --user start hosting-broker.service hosting-worker.service hosting-edge.service
+else
+    "${compose[@]}" build
+    started=true
+    "${compose[@]}" up --detach
+fi
+
+exec_service() {
+    local service=$1
+    shift
+    if [[ "$mode" == "--quadlet" ]]; then
+        podman exec "systemd-hosting-$service" "$@"
+    else
+        "${compose[@]}" exec -T "$service" "$@"
+    fi
+}
 base="https://localhost:$HOSTING_EDGE_PORT"
 request=(curl --silent --show-error --noproxy '*' --cacert "$scratch/edge-server.pem" --max-time 3)
 for attempt in {1..30}; do
     if "${request[@]}" --fail "$base/health/live" >/dev/null 2>&1 &&
-        "${compose[@]}" exec -T worker test -s /var/lib/hosting/runtime/worker-ledger.db &&
-        "${compose[@]}" exec -T broker test -s /var/lib/hosting/broker.db; then
+        exec_service worker test -s /var/lib/hosting/runtime/worker-ledger.db &&
+        exec_service broker test -s /var/lib/hosting/broker.db; then
         break
     fi
     sleep 1
 done
-"${compose[@]}" exec -T worker test -s /var/lib/hosting/runtime/worker-ledger.db
-"${compose[@]}" exec -T broker test -s /var/lib/hosting/broker.db
+exec_service worker test -s /var/lib/hosting/runtime/worker-ledger.db
+exec_service broker test -s /var/lib/hosting/broker.db
 for service in broker worker edge; do
-    if [[ $("${compose[@]}" exec -T "$service" id -u) -eq 0 ]]; then
+    if [[ $(exec_service "$service" id -u) -eq 0 ]]; then
         printf '%s is running as root\n' "$service" >&2
         exit 1
     fi

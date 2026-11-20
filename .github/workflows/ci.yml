@@ -31,3 +31,15 @@ jobs:
         with:
           submodules: recursive
       - run: bash deploy/smoke.sh
+
+  linux-quadlet:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Run rootless Quadlet smoke
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          bash deploy/smoke.sh --quadlet
