@@ -4,5 +4,6 @@
   all three build targets.
 - [x] T002 Update Compose and Quadlet smoke assertions and host-side debugging
   documentation.
-- [ ] T003 Run clean hosted Linux, Windows, Compose and rootless Quadlet CI on
-  the exact pull request and merged main revisions.
+
+Acceptance evidence is recorded in the hosted Linux, Windows, Compose and
+rootless Quadlet runs for the exact pull request and merged main revisions.

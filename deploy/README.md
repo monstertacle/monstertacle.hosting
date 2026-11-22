@@ -100,6 +100,12 @@ denial. It uses temporary certificates, an isolated Compose project and a
 loopback port. The application tests exercise the credential-free
 end-to-end session, worker and artifact protocol separately.
 
+The rootless smoke variant, `bash deploy/smoke.sh --quadlet`, builds and
+starts temporary copies of the sample units under the user's systemd manager,
+with unique unit, image and volume names. It requires working rootless Podman,
+an active user manager and a free loopback port. Hosted CI runs it in an
+isolated Linux runner.
+
 ## Debugging chiseled containers
 
 The runtime images have no shell or package manager. From the host, use
@@ -136,9 +142,3 @@ OAuth flow.
 Record platform, exact revision, client types, scenario outcome and deployment
 prerequisites separately from offline evidence. Live validation requires the
 deployment inputs above.
-
-The rootless smoke variant, `bash deploy/smoke.sh --quadlet`, builds and
-starts temporary copies of the sample units under the user's systemd manager,
-with unique unit, image and volume names. It requires working rootless Podman,
-an active user manager and a free loopback port. Hosted CI runs it in an
-isolated Linux runner.

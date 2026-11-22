@@ -22,8 +22,12 @@ cleanup() {
         systemctl --user stop "$project-edge.service" "$project-worker.service" "$project-broker.service" >&2 || true
         find "$quadlet_units" -depth -delete
         systemctl --user daemon-reload
-        podman volume rm --ignore "systemd-$project-broker-state" "systemd-$project-worker-state" >&2
-        local network
+        local volume network
+        for volume in "systemd-$project-broker-state" "systemd-$project-worker-state"; do
+            if podman volume exists "$volume"; then
+                podman volume rm "$volume" >&2
+            fi
+        done
         for network in "systemd-$project-private" "systemd-$project-outbound"; do
             if podman network exists "$network"; then
                 podman network rm "$network" >&2
@@ -120,8 +124,8 @@ if [[ "$mode" == "--quadlet" ]]; then
     quadlet_units=$(mktemp -d "$XDG_RUNTIME_DIR/containers/systemd/hosting-smoke.XXXXXXXX")
     for unit in "$repo"/deploy/quadlet/*; do
         filename=${unit##*/}
-        sed -e "s|localhost/monstertacle-hosting-|localhost/$project-|g" \
-            -e "s|^\(After=\|Requires=\|Network=\|Volume=\)hosting-|\1$project-|" \
+        sed -E -e "s|localhost/monstertacle-hosting-|localhost/$project-|g" \
+            -e "s@^(After|Requires|Network|Volume)=hosting-@\1=$project-@" \
             -e "s|%h/\.config/monstertacle-hosting|$HOSTING_CONFIG_DIR|g" \
             -e "s|^PublishPort=127\.0\.0\.1:8443:8443$|PublishPort=127.0.0.1:$HOSTING_EDGE_PORT:8443|" \
             "$unit" > "$quadlet_units/$project-${filename#hosting-}"
