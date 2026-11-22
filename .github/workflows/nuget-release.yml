@@ -1,0 +1,163 @@
+name: NuGet tool release
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Operation
+        type: choice
+        options:
+          - verify
+          - login-only
+          - release
+        default: verify
+      expected_version:
+        description: Exact Monstertacle.Hosting.Tool package version
+        required: true
+        type: string
+
+run-name: NuGet tool ${{ inputs.mode }} (${{ inputs.expected_version }})
+
+permissions: {}
+
+jobs:
+  verify:
+    name: Verify tool release inputs and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      filename: ${{ steps.package.outputs.filename }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+      sdk_version: ${{ steps.package.outputs.sdk_version }}
+    env:
+      MODE: ${{ inputs.mode }}
+      EXPECTED_VERSION: ${{ inputs.expected_version }}
+    steps:
+      - name: Require a manual run on canonical main
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch ||
+                "$GITHUB_REPOSITORY" != monstertacle/monstertacle.hosting ||
+                "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::Run this workflow manually on main in monstertacle/monstertacle.hosting."
+            exit 1
+          fi
+          case "$MODE" in
+            verify|login-only|release) ;;
+            *) echo "::error::Unknown operation."; exit 1 ;;
+          esac
+          if [[ -z "$EXPECTED_VERSION" ]]; then
+            echo "::error::An exact package version is required."
+            exit 1
+          fi
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14c95bf1 # v5
+        with:
+          global-json-file: global.json
+      - name: Check the expected tool ID and version
+        shell: pwsh
+        run: ./tests/verify-tool-package.ps1 -ExpectedVersion $env:EXPECTED_VERSION -ValidateIdentityOnly
+      - name: Restore tool project
+        if: inputs.mode != 'login-only'
+        run: dotnet restore src/Monstertacle.Hosting.Tool/Monstertacle.Hosting.Tool.csproj
+      - name: Pack, restore and run the exact tool
+        id: package
+        if: inputs.mode != 'login-only'
+        shell: pwsh
+        run: |
+          $staging = Join-Path $env:RUNNER_TEMP 'verified-tool'
+          ./tests/verify-tool-package.ps1 -ExpectedVersion $env:EXPECTED_VERSION -PackageOutput $staging
+          $package = Get-ChildItem -LiteralPath $staging
+          $digest = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sdk = dotnet --version
+          "filename=$($package.Name)" >> $env:GITHUB_OUTPUT
+          "sha256=$digest" >> $env:GITHUB_OUTPUT
+          "sdk_version=$sdk" >> $env:GITHUB_OUTPUT
+          "Verified $($package.Name) with SHA-256 $digest." >> $env:GITHUB_STEP_SUMMARY
+      - name: Upload immutable verified package
+        id: upload
+        if: inputs.mode != 'login-only'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-tool-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verified-tool/
+          if-no-files-found: error
+
+  nuget:
+    name: Authenticate to NuGet
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'monstertacle/monstertacle.hosting' &&
+      github.ref == 'refs/heads/main' &&
+      (inputs.mode == 'login-only' || inputs.mode == 'release')
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: nuget
+    permissions:
+      id-token: write
+    steps:
+      - name: Require the verified artifact ID
+        if: inputs.mode == 'release'
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ needs.verify.outputs.artifact_id }}
+        run: |
+          if [[ ! "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Missing verified package artifact ID."
+            exit 1
+          fi
+      - name: Download the verified package by artifact ID
+        if: inputs.mode == 'release'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          artifact-ids: ${{ needs.verify.outputs.artifact_id }}
+          path: ${{ runner.temp }}/verified-tool
+      - name: Check the exact package before login
+        if: inputs.mode == 'release'
+        shell: bash
+        env:
+          PACKAGE_FILE: ${{ needs.verify.outputs.filename }}
+          PACKAGE_SHA256: ${{ needs.verify.outputs.sha256 }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          cd "$RUNNER_TEMP/verified-tool"
+          shopt -s dotglob nullglob
+          files=(*)
+          if [[ "$PACKAGE_FILE" != "Monstertacle.Hosting.Tool.${EXPECTED_VERSION}.nupkg" ||
+                ${#files[@]} -ne 1 || "${files[0]}" != "$PACKAGE_FILE" ||
+                ! -f "$PACKAGE_FILE" || -L "$PACKAGE_FILE" ||
+                ! "$PACKAGE_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "::error::Unexpected verified package artifact."
+            exit 1
+          fi
+          printf '%s  %s\n' "$PACKAGE_SHA256" "$PACKAGE_FILE" | sha256sum --check --strict
+      - name: Set up the SDK used to verify the package
+        if: inputs.mode == 'release'
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14c95bf1 # v5
+        with:
+          dotnet-version: ${{ needs.verify.outputs.sdk_version }}
+      - name: Exchange GitHub identity for a short-lived NuGet key
+        id: login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        with:
+          user: bleissem
+      - name: Publish the verified Hosting tool
+        if: inputs.mode == 'release'
+        shell: bash
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+          PACKAGE_FILE: ${{ needs.verify.outputs.filename }}
+          SDK_VERSION: ${{ needs.verify.outputs.sdk_version }}
+        run: |
+          cd "$RUNNER_TEMP/verified-tool"
+          printf '{"sdk":{"version":"%s","rollForward":"disable","allowPrerelease":false}}\n' "$SDK_VERSION" > global.json
+          dotnet nuget push "$PACKAGE_FILE" \
+            --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --no-symbols
