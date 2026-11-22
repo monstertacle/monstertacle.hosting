@@ -38,6 +38,73 @@ public sealed class BrokerHttpTests
     private const string AssertionAudience = "urn:hosting:fixture";
     private const string TrustedWorkflow = "example/hosting/.github/workflows/trusted.yml@refs/heads/main";
 
+    [HostedGitHubFact]
+    public async Task HostedGitHubOidcSmoke()
+    {
+        const string repositoryId = "1465946281";
+        const string main = "refs/heads/main";
+        const string workflow = "monstertacle/monstertacle.hosting/.github/workflows/hosting-oidc-smoke.yml@" + main;
+        const string eventName = "workflow_dispatch";
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var ct = timeout.Token;
+        using var githubHttp = Tool.TokenExchange.CreateClient(Tool.TokenExchange.CreateHandler());
+        var assertion = await Tool.TokenExchange.GetAssertionAsync(githubHttp,
+            Environment.GetEnvironmentVariable("ACTIONS_ID_TOKEN_REQUEST_URL"),
+            Environment.GetEnvironmentVariable("ACTIONS_ID_TOKEN_REQUEST_TOKEN"), AssertionAudience, ct);
+        var discovery = new IssuerDiscovery(GitHubWorkloadTrust.Issuer, githubHttp, TimeProvider.System);
+        var configuration = await discovery.GetConfigurationAsync(ct);
+        Task<IEnumerable<SecurityKey>> GetKeys(CancellationToken _) => Task.FromResult<IEnumerable<SecurityKey>>(configuration.SigningKeys);
+
+        using (var wrongWorkflow = new BrokerFixture())
+        {
+            var wrongTrust = new GitHubWorkloadTrust(AssertionAudience, repositoryId,
+                workflow.Replace("hosting-oidc-smoke.yml", "other-workflow.yml", StringComparison.Ordinal), main, eventName);
+            await using var wrongExchange = await wrongWorkflow.StartExchangeAsync(GetKeys, wrongTrust);
+            using var wrongHttp = wrongWorkflow.ConnectMcpHttp(wrongExchange.Endpoint);
+            using var denied = await Exchange(wrongHttp, wrongExchange.Endpoint, assertion);
+            Assert.Equal(HttpStatusCode.BadRequest, denied.StatusCode);
+            Assert.Equal("invalid_grant", (await denied.Content.ReadFromJsonAsync<JsonElement>(ct)).GetProperty("error").GetString());
+        }
+
+        using var fixture = new BrokerFixture();
+        var trust = new GitHubWorkloadTrust(AssertionAudience, repositoryId, workflow, main, eventName);
+        await using var exchange = await fixture.StartExchangeAsync(GetKeys, trust);
+        using var exchangeHttp = fixture.ConnectMcpHttp(exchange.Endpoint);
+        var accessToken = await Tool.TokenExchange.ExchangeAsync(exchangeHttp, exchange.Endpoint, assertion, new Uri(Audience), WorkloadScope, ct);
+        fixture.SetWorkloadPolicy(DateTimeOffset.UtcNow.AddMinutes(5));
+        using var broker = await fixture.StartAsync(WorkloadSubject);
+        await using var host = await fixture.StartMcpAsync();
+        var endpoint = new Uri(new Uri(host.Urls.Single()), "/mcp");
+        var mutation = Guid.NewGuid();
+        var start = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo", ["task"] = "OIDC smoke" };
+        using var anonymous = fixture.ConnectMcpHttp(endpoint);
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = JsonContent.Create(new { jsonrpc = "2.0", id = 1, method = "tools/call", @params = new { name = "session_start", arguments = start } })
+        };
+        request.Headers.Accept.ParseAdd("application/json, text/event-stream");
+        using var rejected = await anonymous.SendAsync(request, ct);
+        Assert.Equal(HttpStatusCode.Unauthorized, rejected.StatusCode);
+        Assert.False(fixture.HasAdmission(mutation));
+
+        using var authenticated = fixture.ConnectMcpToken(endpoint, accessToken);
+        await using var client = await ConnectMcp(endpoint, authenticated, ct);
+        var admitted = ReadMcpStatus(await client.CallToolAsync("session_start", start, cancellationToken: ct));
+        Assert.NotEqual(Guid.Empty, admitted.SessionId);
+        Assert.True(fixture.HasAdmission(mutation));
+    }
+
+    private sealed class HostedGitHubFactAttribute : FactAttribute
+    {
+        public HostedGitHubFactAttribute()
+        {
+            if (Environment.GetEnvironmentVariable("HOSTING_RUN_GITHUB_OIDC_SMOKE") != "1")
+            {
+                Skip = "Requires the repository's main-only hosted OIDC workflow.";
+            }
+        }
+    }
+
     [Fact]
     public async Task ExchangeVerifiesGitHubAssertionAndIssuesOnlyForTheBoundResource()
     {
@@ -771,9 +838,10 @@ public sealed class BrokerHttpTests
         private int keyRequests;
         private string? exchangeIssuer;
 
-        public async Task<LoopbackTokenExchange> StartExchangeAsync(Func<CancellationToken, Task<IEnumerable<SecurityKey>>> githubKeys)
+        public async Task<LoopbackTokenExchange> StartExchangeAsync(
+            Func<CancellationToken, Task<IEnumerable<SecurityKey>>> githubKeys, GitHubWorkloadTrust? trust = null)
         {
-            var trust = new GitHubWorkloadTrust(AssertionAudience, "1234567", TrustedWorkflow, "refs/heads/main", "push", "trusted");
+            trust ??= new GitHubWorkloadTrust(AssertionAudience, "1234567", TrustedWorkflow, "refs/heads/main", "push", "trusted");
             var exchange = new LoopbackTokenExchange(trust, githubKeys, server, Audience, WorkloadScope, WorkloadSubject);
             await exchange.StartAsync();
             exchangeIssuer = exchange.Issuer;
