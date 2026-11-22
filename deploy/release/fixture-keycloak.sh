@@ -225,7 +225,7 @@ EOF_NETWORK
     jq -jer '.value | strings | select(length > 0)' "$scratch/chat-credential.json" > "$scratch/chat-secret"
     keycloak_code person-one example-chat-one wrong-redirect "$chat_callback-extra"
     keycloak_code person-one example-chat-one missing-secret "$chat_callback"
-    keycloak_code person-one example-chat-one missing "$chat_callback" "$scratch/chat-secret"
+    keycloak_code person-one example-chat-one confidential-missing-verifier "$chat_callback" "$scratch/chat-secret"
     keycloak_code person-one example-chat-one confidential "$chat_callback" "$scratch/chat-secret"
     keycloak_code person-one example-chat-two chat-public "$(jq -er '.clients[2].redirectUris[0]' "$scratch/clients.json")"
     compose+=(-f "$scratch/hosting-keycloak-network.yaml")
@@ -268,7 +268,7 @@ keycloak_code() {
         authentication=(--data-urlencode "client_secret@$client_secret")
     fi
     case "$test_case" in
-        missing) ;;
+        missing|confidential-missing-verifier) ;;
         wrong)
             openssl rand -hex 32 | tr -d '\n' > "$directory/wrong"
             verifier=(--data-urlencode "code_verifier@$directory/wrong")
@@ -281,10 +281,11 @@ keycloak_code() {
         --data-urlencode "code@$directory/code" "${verifier[@]}" "${authentication[@]}" "$protocol/token")
     if [[ "$test_case" == missing-secret ]]; then
         [[ "$status" == 400 || "$status" == 401 ]]
-        jq -e '.access_token == null and .error == "invalid_client"' "$directory/token.json" >/dev/null
+        jq -e '.error == "unauthorized_client" and .access_token == null and .refresh_token == null
+            and .id_token == null' "$directory/token.json" >/dev/null
         return
     fi
-    if [[ "$test_case" == missing || "$test_case" == wrong ]]; then
+    if [[ "$test_case" == missing || "$test_case" == wrong || "$test_case" == confidential-missing-verifier ]]; then
         [[ "$status" == 400 ]]
         jq -e '.access_token == null and (.error == "invalid_grant" or .error == "invalid_request")' "$directory/token.json" >/dev/null
         return
