@@ -21,6 +21,9 @@ HTTP-01 requires public TCP 80 for the challenge.
 [Kestrel endpoints](https://learn.microsoft.com/aspnet/core/fundamentals/servers/kestrel/endpoints)
 and [Let's Encrypt challenge types](https://letsencrypt.org/docs/challenge-types/).
 
+See the [lifecycle runbook](lifecycle.md) for certificate replacement,
+coordinated stopped backup and restore, cutover and rollback.
+
 ## Configuration
 
 Start from a recursive checkout so the pinned Communication source and license
@@ -92,19 +95,18 @@ Windows. The Windows service executables use .NET 11, with WorkerHost using
 the Windows-specific native lease package and a private local directory.
 The image, Compose and Quadlet examples target Linux.
 
-`bash deploy/smoke.sh --config-only` validates Compose interpolation without
-a daemon. `bash deploy/smoke.sh` builds all three images and checks the
-read-only roots and certificate mounts, non-root runtime user, SQLite state,
-worker-to-broker mTLS, edge HTTPS, OAuth resource metadata and anonymous MCP
-denial. It uses temporary certificates, an isolated Compose project and a
-loopback port. The application tests exercise the credential-free
-end-to-end session, worker and artifact protocol separately.
+`bash deploy/smoke.sh --config-only` renders and checks private Compose fixtures.
+Add `--quadlet` to render Quadlet fixtures instead. Without `--config-only`,
+the smoke builds the three chiseled images, verifies the initial stack, replaces
+only the edge and its TLS certificate, then recreates the stack with the original
+volumes. It archives the stopped broker and worker volumes, verifies the restored
+contents in fresh volumes and boots the restored stack.
 
-The rootless smoke variant, `bash deploy/smoke.sh --quadlet`, builds and
-starts temporary copies of the sample units under the user's systemd manager,
-with unique unit, image and volume names. It requires working rootless Podman,
-an active user manager and a free loopback port. Hosted CI runs it in an
-isolated Linux runner.
+Both variants verify private mTLS, edge HTTPS and OAuth resource metadata, anonymous
+MCP denial, and runtime security and state mounts. The application tests separately
+exercise authenticated sessions, recovery and artifact handling. The Quadlet run
+requires rootless Podman and an active user systemd manager. Set `HOSTING_EDGE_PORT`
+to a free loopback port when running concurrently with other workloads.
 
 ## Debugging chiseled containers
 
