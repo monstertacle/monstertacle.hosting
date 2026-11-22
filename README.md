@@ -205,3 +205,8 @@ create an acceptance receipt.
 
 See the [deployment guide](deploy/README.md) for .NET 11 images, Docker Compose,
 rootless Podman Quadlet, and the separate live acceptance procedure.
+
+## Contributing
+
+Review the [secret handling rules and mandatory staged check](docs/secret-handling.md)
+before committing.
