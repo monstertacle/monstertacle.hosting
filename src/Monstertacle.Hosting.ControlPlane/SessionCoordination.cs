@@ -33,7 +33,7 @@ internal sealed partial class SessionStore
             return null;
         }
 
-        var grants = current.People.SelectMany(person => person.Grants
+        var grants = policy.Claimants(current).SelectMany(person => person.Grants
             .Where(grant => grant.Lane == worker.Lane && grant.Actions.Contains("start", StringComparer.Ordinal))
             .SelectMany(grant => person.Identities.Select(identity =>
                 new { person = person.Id, project = grant.Project, issuer = identity.Issuer, subject = identity.Subject })));
@@ -88,7 +88,7 @@ internal sealed partial class SessionStore
             return new(DispatchOutcome.Missing);
         }
 
-        var access = BrokerPolicy.Resolve(policy.Read(), job.Identity);
+        var access = policy.Resolve(job.Identity);
         if (access is null || access.Principal != job.Principal || !access.Allows(job.Project, [worker.Lane], "start"))
         {
             return new(DispatchOutcome.Denied);

@@ -11,6 +11,7 @@ internal sealed class BrokerAuthentication
     private readonly UserTokenSettings tokens;
     private readonly byte[] edgeCertificateHash;
     private readonly WorkerRegistrations workers;
+    public string? WorkloadIssuer => tokens.WorkloadIssuer;
 
     public BrokerAuthentication(IConfiguration configuration)
     {

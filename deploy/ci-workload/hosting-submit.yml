@@ -1,0 +1,54 @@
+name: Submit a Hosting session
+
+on:
+  workflow_dispatch:
+    inputs:
+      mutation_id:
+        description: Stable UUID to reuse if this submission is retried
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  submit:
+    if: github.ref == 'refs/heads/main' && github.repository_id == vars.HOSTING_REPOSITORY_ID
+    environment: hosting-ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    env:
+      HOSTING_MCP_URL: ${{ vars.HOSTING_MCP_URL }}
+      HOSTING_TOKEN_URL: ${{ vars.HOSTING_TOKEN_URL }}
+      HOSTING_ASSERTION_AUDIENCE: ${{ vars.HOSTING_ASSERTION_AUDIENCE }}
+      HOSTING_SCOPE: ${{ vars.HOSTING_SCOPE }}
+      HOSTING_PROJECT: ${{ vars.HOSTING_PROJECT }}
+      HOSTING_TOOL_SOURCE: ${{ vars.HOSTING_TOOL_SOURCE }}
+      MUTATION_ID: ${{ inputs.mutation_id }}
+    steps:
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '11.0.100'
+      - name: Restore the pinned local tool
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $feed = [Uri]$env:HOSTING_TOOL_SOURCE
+          if (!$feed.IsAbsoluteUri -or $feed.Scheme -ne 'https' -or $feed.UserInfo -or $feed.Fragment -or $feed.Query) {
+              throw 'Set HOSTING_TOOL_SOURCE to a trusted HTTPS package feed.'
+          }
+          $source = [Security.SecurityElement]::Escape($feed.AbsoluteUri)
+          '<configuration><packageSources><clear/><add key="hosting" value="' + $source + '"/></packageSources></configuration>' |
+              Set-Content NuGet.Config
+          dotnet new tool-manifest
+          dotnet tool install --local Monstertacle.Hosting.Tool --version 0.1.0 --configfile NuGet.Config
+      - name: Submit and read the session
+        shell: bash
+        run: |
+          set -euo pipefail
+          result=$(dotnet tool run monstertacle-hosting -- submit "$MUTATION_ID" 'Run the registered CI verification')
+          session=$(jq -er '.sessionId' <<< "$result")
+          dotnet tool run monstertacle-hosting -- status "$session"
+          dotnet tool run monstertacle-hosting -- lookup "$MUTATION_ID"

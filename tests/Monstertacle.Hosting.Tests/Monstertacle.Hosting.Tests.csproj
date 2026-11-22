@@ -10,6 +10,7 @@
     <ProjectReference Include="../../src/Monstertacle.Hosting.Contracts/Monstertacle.Hosting.Contracts.csproj" />
     <ProjectReference Include="../../src/Monstertacle.Hosting.ControlPlane/Monstertacle.Hosting.ControlPlane.csproj" />
     <ProjectReference Include="../../src/Monstertacle.Hosting.McpHost/Monstertacle.Hosting.McpHost.csproj" />
+    <ProjectReference Include="../../src/Monstertacle.Hosting.Tool/Monstertacle.Hosting.Tool.csproj" />
     <ProjectReference Include="../../src/Monstertacle.Hosting.WorkerHost/Monstertacle.Hosting.WorkerHost.csproj" />
     <Using Include="Xunit" />
   </ItemGroup>

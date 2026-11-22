@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>monstertacle-hosting</ToolCommandName>
+    <Version>0.1.0</Version>
+    <Authors>Alexander Bleissem</Authors>
+    <Description>Submit and recover Hosting MCP sessions from GitHub Actions.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/monstertacle/monstertacle.hosting</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.4.0" />
+    <ProjectReference Include="../Monstertacle.Hosting.Contracts/Monstertacle.Hosting.Contracts.csproj" />
+    <InternalsVisibleTo Include="Monstertacle.Hosting.Tests" />
+  </ItemGroup>
+</Project>

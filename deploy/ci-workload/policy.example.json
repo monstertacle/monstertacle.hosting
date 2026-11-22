@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "projects": [{ "id": "demo", "lanes": ["primary"] }],
+  "people": [
+    {
+      "id": "operator",
+      "identities": [{ "issuer": "https://human-identity.example", "subject": "operator-subject" }],
+      "grants": [{ "project": "demo", "lane": "primary", "actions": ["start", "read"] }]
+    }
+  ],
+  "workload": {
+    "id": "ci-demo",
+    "identity": { "issuer": "https://workload-identity.example", "subject": "ci-demo-provisioning-01" },
+    "expiresUtc": "2030-01-01T00:00:00Z",
+    "project": "demo",
+    "grants": [{ "project": "demo", "lane": "primary", "actions": ["start", "read"] }]
+  }
+}

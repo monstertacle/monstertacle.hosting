@@ -21,6 +21,7 @@ using ModelContextProtocol.Client;
 using Monstertacle.Hosting.Contracts;
 using Monstertacle.Hosting.ControlPlane;
 using Monstertacle.Hosting.McpHost;
+using Monstertacle.Hosting.Security;
 using Monstertacle.Hosting.WorkerHost;
 using Monstertacle.Multisession.Contracts;
 
@@ -32,6 +33,276 @@ public sealed class BrokerHttpTests
     private const string Issuer = "https://identity.example";
     private const string Audience = "https://hosting.example/mcp";
     private const string Scope = "sessions";
+    private const string WorkloadScope = "ci-sessions";
+    private const string WorkloadSubject = "fixture-ci";
+    private const string AssertionAudience = "urn:hosting:fixture";
+    private const string TrustedWorkflow = "example/hosting/.github/workflows/trusted.yml@refs/heads/main";
+
+    [HostedGitHubFact]
+    public async Task HostedGitHubOidcSmoke()
+    {
+        const string repositoryId = "1465946281";
+        const string main = "refs/heads/main";
+        const string workflow = "monstertacle/monstertacle.hosting/.github/workflows/hosting-oidc-smoke.yml@" + main;
+        const string eventName = "workflow_dispatch";
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var ct = timeout.Token;
+        using var githubHttp = Tool.TokenExchange.CreateClient(Tool.TokenExchange.CreateHandler());
+        var assertion = await Tool.TokenExchange.GetAssertionAsync(githubHttp,
+            Environment.GetEnvironmentVariable("ACTIONS_ID_TOKEN_REQUEST_URL"),
+            Environment.GetEnvironmentVariable("ACTIONS_ID_TOKEN_REQUEST_TOKEN"), AssertionAudience, ct);
+        var discovery = new IssuerDiscovery(GitHubWorkloadTrust.Issuer, githubHttp, TimeProvider.System);
+        var configuration = await discovery.GetConfigurationAsync(ct);
+        Task<IEnumerable<SecurityKey>> GetKeys(CancellationToken _) => Task.FromResult<IEnumerable<SecurityKey>>(configuration.SigningKeys);
+
+        using (var wrongWorkflow = new BrokerFixture())
+        {
+            var wrongTrust = new GitHubWorkloadTrust(AssertionAudience, repositoryId,
+                workflow.Replace("hosting-oidc-smoke.yml", "other-workflow.yml", StringComparison.Ordinal), main, eventName);
+            await using var wrongExchange = await wrongWorkflow.StartExchangeAsync(GetKeys, wrongTrust);
+            using var wrongHttp = wrongWorkflow.ConnectMcpHttp(wrongExchange.Endpoint);
+            using var denied = await Exchange(wrongHttp, wrongExchange.Endpoint, assertion);
+            Assert.Equal(HttpStatusCode.BadRequest, denied.StatusCode);
+            Assert.Equal("invalid_grant", (await denied.Content.ReadFromJsonAsync<JsonElement>(ct)).GetProperty("error").GetString());
+        }
+
+        using var fixture = new BrokerFixture();
+        var trust = new GitHubWorkloadTrust(AssertionAudience, repositoryId, workflow, main, eventName);
+        await using var exchange = await fixture.StartExchangeAsync(GetKeys, trust);
+        using var exchangeHttp = fixture.ConnectMcpHttp(exchange.Endpoint);
+        var accessToken = await Tool.TokenExchange.ExchangeAsync(exchangeHttp, exchange.Endpoint, assertion, new Uri(Audience), WorkloadScope, ct);
+        fixture.SetWorkloadPolicy(DateTimeOffset.UtcNow.AddMinutes(5));
+        using var broker = await fixture.StartAsync(WorkloadSubject);
+        await using var host = await fixture.StartMcpAsync();
+        var endpoint = new Uri(new Uri(host.Urls.Single()), "/mcp");
+        var mutation = Guid.NewGuid();
+        var start = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo", ["task"] = "OIDC smoke" };
+        using var anonymous = fixture.ConnectMcpHttp(endpoint);
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = JsonContent.Create(new { jsonrpc = "2.0", id = 1, method = "tools/call", @params = new { name = "session_start", arguments = start } })
+        };
+        request.Headers.Accept.ParseAdd("application/json, text/event-stream");
+        using var rejected = await anonymous.SendAsync(request, ct);
+        Assert.Equal(HttpStatusCode.Unauthorized, rejected.StatusCode);
+        Assert.False(fixture.HasAdmission(mutation));
+
+        using var authenticated = fixture.ConnectMcpToken(endpoint, accessToken);
+        await using var client = await ConnectMcp(endpoint, authenticated, ct);
+        var admitted = ReadMcpStatus(await client.CallToolAsync("session_start", start, cancellationToken: ct));
+        Assert.NotEqual(Guid.Empty, admitted.SessionId);
+        Assert.True(fixture.HasAdmission(mutation));
+    }
+
+    private sealed class HostedGitHubFactAttribute : FactAttribute
+    {
+        public HostedGitHubFactAttribute()
+        {
+            if (Environment.GetEnvironmentVariable("HOSTING_RUN_GITHUB_OIDC_SMOKE") != "1")
+            {
+                Skip = "Requires the repository's main-only hosted OIDC workflow.";
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ExchangeVerifiesGitHubAssertionAndIssuesOnlyForTheBoundResource()
+    {
+        using var fixture = new BrokerFixture();
+        using var github = RSA.Create(2048);
+        using var wrongKey = RSA.Create(2048);
+        await using var exchange = await fixture.StartExchangeAsync(_ =>
+            Task.FromResult<IEnumerable<SecurityKey>>([new RsaSecurityKey(github) { KeyId = "github" }]));
+        using var http = fixture.ConnectMcpHttp(exchange.Endpoint);
+
+        using var accepted = await Exchange(http, exchange.Endpoint, Assertion(github));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        Assert.True(accepted.Headers.CacheControl?.NoStore);
+        var token = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Bearer", token.GetProperty("token_type").GetString());
+        Assert.Equal(120, token.GetProperty("expires_in").GetInt32());
+        var issued = new JwtSecurityTokenHandler().ReadJwtToken(token.GetProperty("access_token").GetString());
+        Assert.Equal(exchange.Issuer, issued.Issuer);
+        Assert.Equal(Audience, Assert.Single(issued.Audiences));
+        Assert.Equal(WorkloadSubject, issued.Subject);
+
+        foreach (var assertion in new[]
+        {
+            Assertion(github, workflow: TrustedWorkflow.Replace("trusted.yml", "other.yml", StringComparison.Ordinal)),
+            Assertion(github, repository: "7654321"),
+            Assertion(github, branch: "refs/heads/other"),
+            Assertion(github, eventName: "pull_request"),
+            Assertion(github, eventName: "pull_request_target"),
+            Assertion(github, environment: "other"),
+            Assertion(github, jobWorkflow: TrustedWorkflow.Replace("trusted.yml", "reusable.yml", StringComparison.Ordinal)),
+            Assertion(github, issuer: "https://wrong.example"),
+            Assertion(github, audience: "urn:hosting:wrong"),
+            Assertion(github, expired: true),
+            Assertion(wrongKey)
+        })
+        {
+            using var denied = await Exchange(http, exchange.Endpoint, assertion);
+            Assert.Equal(HttpStatusCode.BadRequest, denied.StatusCode);
+            var error = await denied.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("invalid_grant", error.GetProperty("error").GetString());
+            Assert.False(error.TryGetProperty("access_token", out _));
+        }
+
+        using var wrongResource = await Exchange(http, exchange.Endpoint, Assertion(github), "https://wrong.example/mcp");
+        Assert.Equal(HttpStatusCode.BadRequest, wrongResource.StatusCode);
+    }
+
+    private static async Task<HttpResponseMessage> Exchange(HttpClient http, Uri endpoint, string assertion, string resource = Audience)
+    {
+        using var request = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = LoopbackTokenExchange.GrantType,
+            ["subject_token_type"] = LoopbackTokenExchange.JwtType,
+            ["requested_token_type"] = LoopbackTokenExchange.AccessTokenType,
+            ["resource"] = resource, ["scope"] = WorkloadScope, ["subject_token"] = assertion
+        });
+        return await http.PostAsync(endpoint, request);
+    }
+
+    private static string Assertion(RSA signing, string workflow = TrustedWorkflow, string repository = "1234567",
+        string branch = "refs/heads/main", string eventName = "push", string issuer = GitHubWorkloadTrust.Issuer,
+        string audience = AssertionAudience, bool expired = false, string environment = "trusted", string? jobWorkflow = null)
+    {
+        var claims = new List<Claim>
+        {
+            new("sub", WorkloadSubject), new("workflow_ref", workflow), new("repository_id", repository),
+            new("ref", branch), new("event_name", eventName), new("environment", environment)
+        };
+        if (jobWorkflow is not null)
+        {
+            claims.Add(new Claim("job_workflow_ref", jobWorkflow));
+        }
+
+        var now = DateTime.UtcNow;
+        var key = new RsaSecurityKey(signing) { KeyId = "github" };
+        var assertion = new JwtSecurityToken(issuer, audience, claims, now.AddMinutes(-2), now.AddMinutes(expired ? -1 : 2),
+            new SigningCredentials(key, SecurityAlgorithms.RsaSha256));
+        return new JwtSecurityTokenHandler().WriteToken(assertion);
+    }
+
+    [Fact]
+    public async Task WorkloadCanRecoverOnlyItsAdmissionAndRevocationDeniesReplayAndDispatch()
+    {
+        using var fixture = new BrokerFixture();
+        using var github = RSA.Create(2048);
+        await using var exchange = await fixture.StartExchangeAsync(_ =>
+            Task.FromResult<IEnumerable<SecurityKey>>([new RsaSecurityKey(github) { KeyId = "github" }]));
+        using var authorityHttp = fixture.ConnectMcpHttp(exchange.Endpoint);
+        using var issued = await Exchange(authorityHttp, exchange.Endpoint, Assertion(github));
+        issued.EnsureSuccessStatusCode();
+        var accessToken = (await issued.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("access_token").GetString()!;
+        fixture.SetWorkloadPolicy(DateTimeOffset.UtcNow.AddMinutes(10));
+        fixture.RegisterWorker("primary");
+        using var human = await fixture.StartAsync(WorkloadSubject);
+        await using var host = await fixture.StartMcpAsync();
+        var endpoint = new Uri(new Uri(host.Urls.Single()), "/mcp");
+        using var http = fixture.ConnectMcpToken(endpoint, accessToken);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var ct = timeout.Token;
+        await using var client = await ConnectMcp(endpoint, http, ct);
+        using var wrongKey = RSA.Create(2048);
+        var rejectedTokens = new (string? Token, HttpStatusCode Status)[]
+        {
+            (null, HttpStatusCode.Unauthorized),
+            (Assertion(github), HttpStatusCode.Unauthorized),
+            (exchange.Sign(tokenIssuer: "https://wrong.example"), HttpStatusCode.Unauthorized),
+            (exchange.Sign(audience: Audience + "/"), HttpStatusCode.Unauthorized),
+            (exchange.Sign(expired: true), HttpStatusCode.Unauthorized),
+            (exchange.Sign(otherKey: wrongKey), HttpStatusCode.Unauthorized),
+            (exchange.Sign(tokenSubject: "unlisted-workload"), HttpStatusCode.Forbidden)
+        };
+        foreach (var (token, status) in rejectedTokens)
+        {
+            var invalidMutation = Guid.NewGuid();
+            using var edgeCaller = fixture.ConnectMcpToken(endpoint, token);
+            using var brokerCaller = fixture.Connect(token);
+            using var edgeRejection = await SendMcp(edgeCaller, endpoint, "tools/call",
+                new { name = "session_start", arguments = new { mutationId = invalidMutation, project = "demo", task = "fixture" } }, ct);
+            using var brokerRejection = await brokerCaller.PostAsJsonAsync(Sessions, new StartSession(invalidMutation, "demo", "fixture"), ct);
+            Assert.Equal(status, edgeRejection.StatusCode);
+            Assert.Equal(status, brokerRejection.StatusCode);
+            Assert.False(fixture.HasAdmission(invalidMutation));
+        }
+
+        using var productionHandler = (HttpClientHandler)Tool.TokenExchange.CreateHandler();
+        fixture.PinLoopbackCertificate(productionHandler);
+        using var redirectHttp = Tool.TokenExchange.CreateClient(productionHandler, disposeHandler: false);
+        await Assert.ThrowsAsync<Tool.ToolException>(() => Tool.TokenExchange.ExchangeAsync(redirectHttp,
+            exchange.RedirectEndpoint, Assertion(github), new Uri(Audience), WorkloadScope, ct));
+        var redirectedMutation = Guid.NewGuid();
+        var (redirectExit, redirectBody) = await fixture.RunToolAsync(
+            ["submit", redirectedMutation.ToString("D"), "fixture"], endpoint, exchange.RedirectEndpoint, Assertion(github));
+        Assert.Equal(1, redirectExit);
+        Assert.Equal("Token exchange failed.", redirectBody.GetProperty("error").GetString());
+        Assert.Equal(0, exchange.RedirectTargetRequests);
+        Assert.False(fixture.HasAdmission(redirectedMutation));
+
+        var deniedId = Guid.NewGuid();
+        var denied = new Dictionary<string, object?> { ["mutationId"] = deniedId, ["project"] = "other", ["task"] = "fixture" };
+        Assert.True((await client.CallToolAsync("session_start", denied, cancellationToken: ct)).IsError);
+        Assert.False(fixture.HasAdmission(deniedId));
+
+        var mutation = Guid.NewGuid();
+        var start = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo", ["task"] = "fixture" };
+        var session = ReadMcpStatus(await client.CallToolAsync("session_start", start, cancellationToken: ct));
+        using var anonymous = fixture.ConnectMcpHttp(endpoint);
+        foreach (var (method, parameters) in new (string, object)[]
+        {
+            ("initialize", new { protocolVersion = "2025-11-25", capabilities = new { }, clientInfo = new { name = "fixture", version = "1" } }),
+            ("tools/list", new { }),
+            ("tools/call", new { name = "session_start", arguments = start })
+        })
+        {
+            using var allowed = await SendMcp(http, endpoint, method, parameters, ct);
+            using var unauthorized = await SendMcp(anonymous, endpoint, method, parameters, ct);
+            Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+        }
+        using var liveness = await anonymous.GetAsync("/health/live", ct);
+        Assert.Equal(HttpStatusCode.NoContent, liveness.StatusCode);
+        using var metadata = await anonymous.GetAsync("/.well-known/oauth-protected-resource/mcp", ct);
+        Assert.Equal(HttpStatusCode.OK, metadata.StatusCode);
+        var lookup = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo" };
+        Assert.Equal(session.SessionId, ReadMcpStatus(await client.CallToolAsync("session_lookup", lookup, cancellationToken: ct)).SessionId);
+        foreach (var command in new[]
+        {
+            new[] { "submit", mutation.ToString("D"), "fixture" },
+            new[] { "status", session.SessionId.ToString("D") },
+            new[] { "lookup", mutation.ToString("D") }
+        })
+        {
+            var (exit, body) = await fixture.RunToolAsync(command, endpoint, exchange.Endpoint, Assertion(github));
+            Assert.True(exit == 0, exit == 0 ? null : body.GetProperty("error").GetString());
+            Assert.Equal(session.SessionId, body.GetProperty("sessionId").GetGuid());
+        }
+        using var humanRead = await human.GetAsync($"{Sessions}/{session.SessionId}", ct);
+        Assert.Equal(HttpStatusCode.NotFound, humanRead.StatusCode);
+
+        using var worker = fixture.ConnectWorker("primary");
+        var claim = await Claim(worker, new ClaimJob(Guid.NewGuid()));
+        var dispatch = $"{WorkerJobPath(claim)}/dispatch";
+        fixture.SetWorkloadPolicy(DateTimeOffset.UtcNow.AddMinutes(-1));
+        using var expired = await worker.PostAsync(dispatch, null, ct);
+        Assert.Equal(HttpStatusCode.Forbidden, expired.StatusCode);
+        var expiredMutation = Guid.NewGuid();
+        Assert.True((await client.CallToolAsync("session_start", new Dictionary<string, object?>(start)
+            { ["mutationId"] = expiredMutation }, cancellationToken: ct)).IsError);
+        Assert.False(fixture.HasAdmission(expiredMutation));
+        fixture.SetWorkloadPolicy(null);
+        using var revoked = await worker.PostAsync(dispatch, null, ct);
+        Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
+        Assert.True((await client.CallToolAsync("session_start", start, cancellationToken: ct)).IsError);
+        var revokedMutation = Guid.NewGuid();
+        Assert.True((await client.CallToolAsync("session_start", new Dictionary<string, object?>(start)
+            { ["mutationId"] = revokedMutation }, cancellationToken: ct)).IsError);
+        Assert.False(fixture.HasAdmission(revokedMutation));
+        Assert.True((await client.CallToolAsync("session_lookup", lookup, cancellationToken: ct)).IsError);
+    }
 
     [Fact]
     public async Task ConcurrentStartsAndReconnectHaveOneDurableAdmission()
@@ -525,18 +796,34 @@ public sealed class BrokerHttpTests
         Assert.Equal(HttpStatusCode.Unauthorized, missing.StatusCode);
         Assert.Contains("resource_metadata=\"https://hosting.example/.well-known/oauth-protected-resource/mcp\"",
             missing.Headers.WwwAuthenticate.ToString());
+        var deniedMutation = Guid.NewGuid();
         using var unlisted = fixture.ConnectMcpHttp(endpoint, "unlisted");
         foreach (var message in new[]
         {
             """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}""",
             """{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""",
-            """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_list","arguments":{"project":"demo"}}}"""
+            """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_list","arguments":{"project":"demo"}}}""",
+            JsonSerializer.Serialize(new { jsonrpc = "2.0", id = 4, method = "tools/call", @params = new
+            {
+                name = "session_start", arguments = new { project = "demo", mutationId = deniedMutation, task = "denied" }
+            } })
         })
         {
             using var denied = await unlisted.PostAsync(endpoint,
                 new StringContent(message, System.Text.Encoding.UTF8, "application/json"), ct);
             Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+            using var anonymous = await transport.PostAsync(endpoint,
+                new StringContent(message, System.Text.Encoding.UTF8, "application/json"), ct);
+            Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
         }
+
+        foreach (var method in new[] { HttpMethod.Get, HttpMethod.Delete, HttpMethod.Options, HttpMethod.Head })
+        {
+            using var request = new HttpRequestMessage(method, endpoint);
+            using var denied = await transport.SendAsync(request, ct);
+            Assert.Equal(HttpStatusCode.Unauthorized, denied.StatusCode);
+        }
+        Assert.False(fixture.HasAdmission(deniedMutation));
 
         var mutation = Guid.NewGuid();
         var arguments = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo", ["task"] = "fixture" };
@@ -576,6 +863,18 @@ public sealed class BrokerHttpTests
             TransportMode = HttpTransportMode.StreamableHttp
         }, client), cancellationToken: cancellationToken);
 
+    private static async Task<HttpResponseMessage> SendMcp(HttpClient client, Uri endpoint, string method, object parameters,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = JsonContent.Create(new { jsonrpc = "2.0", id = 1, method, @params = parameters })
+        };
+        request.Headers.Accept.ParseAdd("application/json, text/event-stream");
+        request.Headers.Add("MCP-Protocol-Version", "2025-11-25");
+        return await client.SendAsync(request, cancellationToken);
+    }
+
     private static SessionStatus ReadMcpStatus(ModelContextProtocol.Protocol.CallToolResult result) =>
         ReadMcp<SessionStatus>(result);
 
@@ -611,10 +910,32 @@ public sealed class BrokerHttpTests
         private readonly Dictionary<string, X509Certificate2> workers = new(StringComparer.Ordinal);
         private WebApplication? app;
         private int keyRequests;
+        private string? exchangeIssuer;
+
+        public async Task<LoopbackTokenExchange> StartExchangeAsync(
+            Func<CancellationToken, Task<IEnumerable<SecurityKey>>> githubKeys, GitHubWorkloadTrust? trust = null)
+        {
+            trust ??= new GitHubWorkloadTrust(AssertionAudience, "1234567", TrustedWorkflow, "refs/heads/main", "push", "trusted");
+            var exchange = new LoopbackTokenExchange(trust, githubKeys, server, Audience, WorkloadScope, WorkloadSubject);
+            await exchange.StartAsync();
+            exchangeIssuer = exchange.Issuer;
+            return exchange;
+        }
 
         public string MetadataIssuer { get; set; } = Issuer;
         public int KeyRequests => Volatile.Read(ref keyRequests);
         public string WorkerDirectory => Path.Combine(directory.FullName, "worker");
+
+        public bool HasAdmission(Guid mutation)
+        {
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+                { DataSource = Path.Combine(directory.FullName, "broker.db"), Pooling = false }.ToString());
+            connection.Open();
+            using var query = connection.CreateCommand();
+            query.CommandText = "SELECT EXISTS (SELECT 1 FROM sessions WHERE mutation_id = $mutation);";
+            query.Parameters.AddWithValue("$mutation", mutation.ToString("D"));
+            return (long)query.ExecuteScalar()! != 0;
+        }
 
         public void CorruptArtifact(Guid jobId)
         {
@@ -650,9 +971,14 @@ public sealed class BrokerHttpTests
                 settings[$"Broker:Workers:{lane}:CertificateSha256"] = certificate.GetCertHashString(HashAlgorithmName.SHA256);
             }
 
+            if (exchangeIssuer is { } issuer)
+            {
+                settings["Broker:Authentication:Workload:Issuer"] = issuer;
+                settings["Broker:Authentication:Workload:Scope"] = WorkloadScope;
+            }
             builder.Configuration.AddInMemoryCollection(settings);
             builder.Services.AddSingleton<TimeProvider>(clock);
-            builder.Services.Configure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme,
+            builder.Services.ConfigureAll<JwtBearerOptions>(
                 options => options.BackchannelHttpHandler = new DiscoveryHandler(this));
             app = BrokerApplication.Build(builder);
             await app.StartAsync();
@@ -678,7 +1004,12 @@ public sealed class BrokerHttpTests
                 ["Kestrel:Endpoints:Fixture:Url"] = "https://127.0.0.1:0",
                 ["Kestrel:Certificates:Default:Path"] = Path.Combine(directory.FullName, "server.pfx")
             });
-            builder.Services.Configure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme,
+            if (exchangeIssuer is { } issuer)
+            {
+                builder.Configuration["Mcp:Authentication:Workload:Issuer"] = issuer;
+                builder.Configuration["Mcp:Authentication:Workload:Scope"] = WorkloadScope;
+            }
+            builder.Services.ConfigureAll<JwtBearerOptions>(
                 options => options.BackchannelHttpHandler = new DiscoveryHandler(this));
             builder.Services.PostConfigure<HttpClientFactoryOptions>(McpApplication.BrokerClientName,
                 options => options.HttpMessageHandlerBuilderActions.Add(handler =>
@@ -691,6 +1022,27 @@ public sealed class BrokerHttpTests
 
         public HttpClient ConnectMcpHttp(Uri endpoint, string? subject = null) =>
             Connect(endpoint, subject is null ? null : Token(subject), null);
+
+        public HttpClient ConnectMcpToken(Uri endpoint, string? token) => Connect(endpoint, token, null);
+
+        public void PinLoopbackCertificate(HttpClientHandler handler) =>
+            handler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) => server.Equals(certificate);
+
+        public async Task<(int Exit, JsonElement Body)> RunToolAsync(string[] args, Uri endpoint, Uri tokenEndpoint, string assertion)
+        {
+            var settings = new Dictionary<string, string>
+            {
+                ["HOSTING_PROJECT"] = "demo", ["HOSTING_MCP_URL"] = Audience,
+                ["HOSTING_TOKEN_URL"] = tokenEndpoint.AbsoluteUri, ["HOSTING_SCOPE"] = WorkloadScope,
+                ["HOSTING_ASSERTION_AUDIENCE"] = AssertionAudience,
+                ["ACTIONS_ID_TOKEN_REQUEST_URL"] = "https://pipelines.actions.githubusercontent.com/fixture?api-version=1",
+                ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = "fixture-request-token"
+            };
+            using var output = new StringWriter();
+            var exit = await Tool.Program.RunAsync(args, settings.GetValueOrDefault, output, new ToolHandler(server, assertion, endpoint));
+            using var document = JsonDocument.Parse(output.ToString());
+            return (exit, document.RootElement.Clone());
+        }
 
         public async Task StopAsync()
         {
@@ -743,6 +1095,18 @@ public sealed class BrokerHttpTests
                 now.AddMinutes(-10), now.AddMinutes(expired ? -1 : 10), new SigningCredentials(signingKey, algorithm));
             return new JwtSecurityTokenHandler().WriteToken(token);
         }
+
+        public void SetWorkloadPolicy(DateTimeOffset? expiresUtc) => SetRawPolicy(JsonSerializer.Serialize(new
+        {
+            version = 1,
+            projects = new[] { new { id = "demo", lanes = new[] { "primary" } }, new { id = "other", lanes = new[] { "primary" } } },
+            people = new[] { new { id = WorkloadSubject, identities = new[] { new { issuer = Issuer, subject = WorkloadSubject } }, grants = Array.Empty<object>() } },
+            workload = expiresUtc is null ? null : new
+            {
+                id = WorkloadSubject, identity = new { issuer = exchangeIssuer, subject = WorkloadSubject },
+                expiresUtc, project = "demo", grants = new[] { new { project = "demo", lane = "primary", actions = new[] { "start", "read" } } }
+            }
+        }));
 
         private string PolicyPath => Path.Combine(directory.FullName, "policy.json");
 
@@ -814,10 +1178,61 @@ public sealed class BrokerHttpTests
             public void Advance() => Interlocked.Add(ref extraMinutes, 6);
         }
 
-        private sealed class DiscoveryHandler(BrokerFixture fixture) : HttpMessageHandler
+        private sealed class ToolHandler : HttpClientHandler
         {
+            private readonly string assertion;
+            private readonly Uri endpoint;
+
+            public ToolHandler(X509Certificate2 server, string assertion, Uri endpoint)
+            {
+                this.assertion = assertion;
+                this.endpoint = endpoint;
+                AllowAutoRedirect = false;
+                UseCookies = false;
+                ServerCertificateCustomValidationCallback = (_, certificate, _, _) => server.Equals(certificate);
+            }
+
             protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {
+                if (request.RequestUri?.Host == "pipelines.actions.githubusercontent.com")
+                {
+                    Assert.Equal(HttpMethod.Get, request.Method);
+                    Assert.Equal("?api-version=1&audience=urn%3Ahosting%3Afixture", request.RequestUri.Query);
+                    Assert.Equal("fixture-request-token", request.Headers.Authorization?.Parameter);
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = JsonContent.Create(new { value = assertion })
+                    });
+                }
+
+                Assert.NotEqual(assertion, request.Headers.Authorization?.Parameter);
+                if (request.RequestUri?.AbsoluteUri == Audience)
+                {
+                    request.RequestUri = endpoint;
+                }
+                return base.SendAsync(request, cancellationToken);
+            }
+        }
+
+        private sealed class DiscoveryHandler : HttpClientHandler
+        {
+            private readonly BrokerFixture fixture;
+
+            public DiscoveryHandler(BrokerFixture fixture)
+            {
+                this.fixture = fixture;
+                AllowAutoRedirect = false;
+                ServerCertificateCustomValidationCallback = (_, certificate, _, _) => fixture.server.Equals(certificate);
+            }
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                if (fixture.exchangeIssuer is { } issuer &&
+                    request.RequestUri?.GetLeftPart(UriPartial.Authority) == issuer)
+                {
+                    return base.SendAsync(request, cancellationToken);
+                }
+
                 if (request.RequestUri?.AbsoluteUri == Issuer + "/.well-known/openid-configuration")
                 {
                     return Reply(new { issuer = fixture.MetadataIssuer, jwks_uri = Issuer + "/jwks" });

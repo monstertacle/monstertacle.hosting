@@ -1,0 +1,28 @@
+name: Hosted OIDC smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  loopback:
+    if: github.repository_id == '1465946281' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Verify GitHub-issued OIDC against disposable Hosting endpoints
+        env:
+          HOSTING_RUN_GITHUB_OIDC_SMOKE: '1'
+        run: dotnet test -c Release --filter FullyQualifiedName~HostedGitHubOidcSmoke

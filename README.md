@@ -10,6 +10,7 @@ and result custody. Workers run registered execution plans.
 2. [Worker coordination and cancellation](specs/002-coordination/spec.md)
 3. [Runtime integration and verified results](specs/003-results/spec.md)
 4. [Packaging and qualification](specs/004-deployment/spec.md)
+5. [GitHub Actions workload access](deploy/ci-workload/README.md)
 
 The repository uses .NET 11 (`net11.0` and `net11.0-windows` where applicable),
 C#, and shell or PowerShell. See the [constitution](.specify/memory/constitution.md).

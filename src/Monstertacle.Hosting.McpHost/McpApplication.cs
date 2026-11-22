@@ -1,4 +1,5 @@
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Monstertacle.Communication.Mcp;
 using Monstertacle.Hosting.Security;
@@ -9,7 +10,6 @@ public static class McpApplication
 {
     private const string McpRoute = "/mcp";
     private const string MetadataRoute = "/.well-known/oauth-protected-resource" + McpRoute;
-    private const string ToolPolicy = "session-tools";
     public const string BrokerClientName = "session-broker";
 
     public static WebApplication Build(WebApplicationBuilder builder)
@@ -29,7 +29,7 @@ public static class McpApplication
             throw new InvalidOperationException("The broker URL must be an HTTPS origin.");
         }
 
-        var policy = new BrokerPolicy(settings);
+        var policy = new BrokerPolicy(settings, tokens.WorkloadIssuer);
         tokens.Configure(builder.Services, saveToken: true);
         builder.Services.Configure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
             options.Events.OnChallenge = context =>
@@ -39,9 +39,6 @@ public static class McpApplication
                 context.Response.Headers.WWWAuthenticate = $"Bearer resource_metadata=\"{metadataUri}\"";
                 return Task.CompletedTask;
             });
-        builder.Services.AddAuthorizationBuilder().AddPolicy(ToolPolicy, authorization =>
-            authorization.RequireAuthenticatedUser().RequireAssertion(context => policy.Resolve(context.User) is not null));
-
         builder.Services.AddSingleton<X509Certificate2>(_ =>
         {
             var path = settings["BrokerClientCertificateFile"];
@@ -70,6 +67,7 @@ public static class McpApplication
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = 128 * 1024);
         var app = builder.Build();
         _ = app.Services.GetRequiredService<X509Certificate2>();
+        app.UseAuthentication();
         app.Use(async (context, next) =>
         {
             if (context.Request.Path.StartsWithSegments(McpRoute))
@@ -80,11 +78,28 @@ public static class McpApplication
                     context.Response.StatusCode = StatusCodes.Status403Forbidden;
                     return;
                 }
+
+                if (context.User.Identity?.IsAuthenticated != true)
+                {
+                    await context.ChallengeAsync();
+                    return;
+                }
+
+                if (policy.Resolve(context.User) is null)
+                {
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    return;
+                }
+
+                if (HttpMethods.IsOptions(context.Request.Method))
+                {
+                    context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+                    return;
+                }
             }
 
             await next(context);
         });
-        app.UseAuthentication();
         app.UseAuthorization();
         app.MapGet("/health/live", () => Results.NoContent());
         app.MapGet(MetadataRoute, () => Results.Json(new
@@ -94,7 +109,7 @@ public static class McpApplication
             scopes_supported = new[] { tokens.Scope },
             bearer_methods_supported = new[] { "header" }
         }));
-        app.MapMonstertacleMcp(McpRoute).RequireAuthorization(ToolPolicy);
+        app.MapMonstertacleMcp(McpRoute).RequireAuthorization();
         return app;
     }
 }
