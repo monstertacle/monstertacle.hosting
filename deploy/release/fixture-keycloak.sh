@@ -26,10 +26,10 @@ start_keycloak_fixture() {
             {name:"Extra audience",protocol:"openid-connect",protocolMapper:"oidc-audience-mapper",
                 config:{"included.custom.audience":"https://other.example.test/mcp","access.token.claim":"true"}}
         ])]' > "$KEYCLOAK_CONFIG_DIR/realm.json"
-    for path in database-password bootstrap-password; do
+    for path in database-password postgres-admin-password bootstrap-password; do
         openssl rand -hex 24 | tr -d '\n' > "$KEYCLOAK_CONFIG_DIR/$path"
     done
-    chmod 0444 "$KEYCLOAK_CONFIG_DIR/"{realm.json,database-password,bootstrap-password}
+    chmod 0444 "$KEYCLOAK_CONFIG_DIR/"{realm.json,database-password,postgres-admin-password,bootstrap-password}
     cat > "$scratch/keycloak-network.yaml" <<EOF_NETWORK
 services:
   proxy:
@@ -61,14 +61,24 @@ EOF_NETWORK
         sleep 1
     done
     [[ "$status" == 200 ]]
-    jq -e --arg issuer "$issuer" '
-        .issuer == $issuer and .authorization_endpoint == ($issuer + "/protocol/openid-connect/auth")
-        and .token_endpoint == ($issuer + "/protocol/openid-connect/token")
-        and (.code_challenge_methods_supported | index("S256") != null)
-    ' "$scratch/discovery.json" >/dev/null
+    keycloak_request --fail -o "$scratch/authorization-server.json" \
+        "$KEYCLOAK_PUBLIC_ORIGIN/.well-known/oauth-authorization-server/realms/hosting"
+    for path in discovery authorization-server; do
+        jq -e --arg issuer "$issuer" '
+            .issuer == $issuer and .authorization_endpoint == ($issuer + "/protocol/openid-connect/auth")
+            and .token_endpoint == ($issuer + "/protocol/openid-connect/token")
+        ' "$scratch/$path.json" >/dev/null
+    done
+    jq -e '.code_challenge_methods_supported | index("S256") != null' "$scratch/discovery.json" >/dev/null
+
+    phase="Keycloak database ownership"
+    [[ "$("${keycloak_compose[@]}" exec -T --user postgres database psql --no-psqlrc -U postgres -d postgres -Atc \
+        "SELECT pg_get_userbyid(datdba) = 'keycloak' AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+         FROM pg_database JOIN pg_roles ON rolname = 'keycloak' WHERE datname = 'keycloak';")" == t ]]
 
     phase="Keycloak public listener isolation"
     for path in /admin/realms/hosting/users /realms/master/.well-known/openid-configuration \
+        /.well-known/oauth-authorization-server/realms/master \
         /realms/hosting/clients-registrations/openid-connect /realms/hosting/login-actions/registration /health; do
         [[ "$(keycloak_request -o /dev/null -w '%{http_code}' "$KEYCLOAK_PUBLIC_ORIGIN$path")" == 404 ]]
     done

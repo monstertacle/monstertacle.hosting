@@ -30,6 +30,7 @@ mkdir -m 0700 "$KEYCLOAK_CONFIG_DIR"
 bash keycloak/render-realm.sh https://mcp.example.net/mcp example-hosting \
   http://127.0.0.1:19876/mcp/oauth/callback > "$KEYCLOAK_CONFIG_DIR/realm.json"
 openssl rand -hex 32 | tr -d '\n' > "$KEYCLOAK_CONFIG_DIR/database-password"
+openssl rand -hex 32 | tr -d '\n' > "$KEYCLOAK_CONFIG_DIR/postgres-admin-password"
 openssl rand -hex 32 | tr -d '\n' > "$KEYCLOAK_CONFIG_DIR/bootstrap-password"
 ```
 
@@ -38,10 +39,17 @@ in `tls.key` under the private directory. With ordinary Docker Engine bind
 mounts, Keycloak and PostgreSQL run as different unprivileged container UIDs.
 Keep the enclosing host directory at mode `0700` and make only the mounted
 realm and password leaves readable to those UIDs. For example, use
-`0444` on `realm.json`, `database-password` and `bootstrap-password`.
+`0444` on `realm.json`, `database-password`, `postgres-admin-password` and
+`bootstrap-password`.
 Keep the TLS key at `0600`. The initial secret files have no trailing line
 break and remain inside the private directory. Inspect permissions without
 printing file contents.
+
+PostgreSQL initializes a `keycloak` login that owns its dedicated database
+without server administration privileges. Only PostgreSQL receives the
+separate bootstrap PostgreSQL password. Initialization applies to an empty
+database volume. To migrate an existing database, plan a backup and restore
+into a separately initialized database with the least-privilege owner.
 
 Install the realm with the temporary bootstrap admin overlay.
 
@@ -130,7 +138,8 @@ Configure both Hosting authentication sections with
 `https://identity.example.net:9443/realms/hosting`, the same HTTPS `/mcp`
 resource audience used to render the realm, and scope `sessions`. The
 broker and edge need network access to the HTTPS discovery and JWKS
-endpoints. See the [operator enrollment](../enrollment/README.md) and
+endpoints. The public listener serves both OIDC and RFC 8414 metadata for the
+`hosting` realm. See the [operator enrollment](../enrollment/README.md) and
 [Keycloak hostname](https://www.keycloak.org/server/hostname) guides.
 
 ## OpenCode static registration

@@ -73,7 +73,7 @@ cp -- "$policy" "$work/original"
 status=0
 { cat -- "$request" && printf '\0' && cat -- "$work/original"; } |
     "$engine" run --rm -i --pull never --network none --read-only --log-driver none \
-        --cap-drop ALL --security-opt no-new-privileges "$image" policy-enrollment \
+        --cap-drop ALL --security-opt no-new-privileges "$actual" policy-enrollment \
         > "$work/candidate" 2> "$work/diagnostic" || status=$?
 case "$status" in
     0|3) ;;

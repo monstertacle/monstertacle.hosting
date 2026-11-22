@@ -29,6 +29,26 @@ if [[ -n "$(find . \( -name .git -o -name '*.cs' -o -name '*.csproj' -o -name Do
     printf 'Unexpected checkout or application source in the bundle.\n' >&2
     exit 1
 fi
+if ! cmp -s - <(find enrollment keycloak -mindepth 1 ! -type d -printf '%p %y\n' | LC_ALL=C sort) <<'EOF_FILES'
+enrollment/README.md f
+enrollment/compose.yaml f
+enrollment/enroll.sh f
+enrollment/policy.example.json f
+enrollment/quadlet/hosting-broker.container.d/50-enrollment.conf f
+enrollment/quadlet/hosting-edge.container.d/50-enrollment.conf f
+keycloak/README.md f
+keycloak/bootstrap.compose.yaml f
+keycloak/compose.yaml f
+keycloak/enroll-user.sh f
+keycloak/init-database.sh f
+keycloak/nginx.conf f
+keycloak/render-realm.sh f
+keycloak/start-reference.sh f
+EOF_FILES
+then
+    printf 'Unexpected enrollment or Keycloak bundle entries.\n' >&2
+    exit 1
+fi
 "$engine" load --input "$assets/$images"
 bash ./quickstart.sh "$mode"
 bash ./quickstart.sh "$mode" enrollment
