@@ -6,6 +6,9 @@
 - [x] T103 Implement idempotent cancel and prevent further dispatch when it wins.
 - [x] T104 Verify restart with two children, third-lane denial, cancel races,
   unsupported stop, replay and lane revocation.
+- [x] T105 Verify acceptance 5 in
+  `ConcurrentOwnerSessionsKeepExecutionAndResultsIsolated` with gated
+  provider overlap, independent requests and owner-scoped results.
 
 The integration suite uses two pinned lanes, preserves cancellation and
 execution certainty separately, and drops successful claim, dispatch and
