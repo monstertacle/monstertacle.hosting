@@ -10,7 +10,6 @@ internal sealed class UserTokenSettings
 {
     internal const string WorkloadScheme = "WorkloadBearer";
     private const string SelectorScheme = "HostingBearer";
-    private const string GitHubIssuer = "https://token.actions.githubusercontent.com";
     private readonly string? workloadScope;
     public string Issuer { get; }
     public string Audience { get; }
@@ -28,7 +27,8 @@ internal sealed class UserTokenSettings
         {
             WorkloadIssuer = RequireHttps(workload, "Issuer");
             workloadScope = RequireScope(workload);
-            if (WorkloadIssuer.TrimEnd('/') == Issuer.TrimEnd('/') || WorkloadIssuer.TrimEnd('/') == GitHubIssuer)
+            if (new Uri(WorkloadIssuer.TrimEnd('/')) == new Uri(Issuer.TrimEnd('/')) ||
+                new Uri(WorkloadIssuer.TrimEnd('/')) == new Uri(GitHubWorkloadTrust.Issuer))
             {
                 throw new InvalidOperationException("The workload token issuer must be separate from the human and GitHub issuers.");
             }

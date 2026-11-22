@@ -32,3 +32,29 @@ keys and policy, with live deployment and human clients qualified separately.
 - [RFC 8693 OAuth 2.0 Token Exchange](https://datatracker.ietf.org/doc/html/rfc8693)
 - [GitHub Actions OIDC claims](https://docs.github.com/en/actions/reference/security/oidc)
 - [GitHub issuer discovery](https://token.actions.githubusercontent.com/.well-known/openid-configuration)
+
+## Federation policy contract
+
+The token service must verify the signature against GitHub's discoverable
+signing keys and require the exact GitHub issuer, a single configured audience,
+and current validity. Use an ordinal match on the signed `repository_id`,
+`workflow_ref`, `ref`, and `event_name` claims. Configure exactly one event,
+`push` or `workflow_dispatch`. When using an environment, bind its exact
+signed name. For a reusable workflow, bind its full `job_workflow_ref`
+separately from the caller workflow. For a direct workflow, that claim may
+be absent or repeat the direct workflow ref.
+
+Apply a GitHub branch protection rule or ruleset to the designated branch.
+Restrict changes to the workflow and its inputs to trusted reviewers and
+restrict bypass permissions. When an environment is used, restrict it to the
+designated branch and configure any required approvals in GitHub. Matching a
+signed branch ref attests which ref ran. Repository protection is a separate
+operator control, and the token service does not use runner environment flags
+as evidence of protection.
+
+The token service must use the configured workload subject independent of the
+GitHub assertion subject, audience equal to the HTTPS MCP resource, the
+configured workload scope, a signed `at+jwt` access token with `iat` and
+`exp` at most five minutes apart, and a signing authority separate from the
+human issuer and GitHub. The acceptance fixture issues a two-minute token and
+binds the token exchange request to the configured resource and scope.

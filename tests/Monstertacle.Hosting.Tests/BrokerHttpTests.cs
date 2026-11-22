@@ -21,6 +21,7 @@ using ModelContextProtocol.Client;
 using Monstertacle.Hosting.Contracts;
 using Monstertacle.Hosting.ControlPlane;
 using Monstertacle.Hosting.McpHost;
+using Monstertacle.Hosting.Security;
 using Monstertacle.Hosting.WorkerHost;
 using Monstertacle.Multisession.Contracts;
 
@@ -32,20 +33,108 @@ public sealed class BrokerHttpTests
     private const string Issuer = "https://identity.example";
     private const string Audience = "https://hosting.example/mcp";
     private const string Scope = "sessions";
-    private const string WorkloadIssuer = "https://workload.example";
     private const string WorkloadScope = "ci-sessions";
     private const string WorkloadSubject = "fixture-ci";
+    private const string AssertionAudience = "urn:hosting:fixture";
+    private const string TrustedWorkflow = "example/hosting/.github/workflows/trusted.yml@refs/heads/main";
+
+    [Fact]
+    public async Task ExchangeVerifiesGitHubAssertionAndIssuesOnlyForTheBoundResource()
+    {
+        using var fixture = new BrokerFixture();
+        using var github = RSA.Create(2048);
+        using var wrongKey = RSA.Create(2048);
+        await using var exchange = await fixture.StartExchangeAsync(_ =>
+            Task.FromResult<IEnumerable<SecurityKey>>([new RsaSecurityKey(github) { KeyId = "github" }]));
+        using var http = fixture.ConnectMcpHttp(exchange.Endpoint);
+
+        using var accepted = await Exchange(http, exchange.Endpoint, Assertion(github));
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        Assert.True(accepted.Headers.CacheControl?.NoStore);
+        var token = await accepted.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Bearer", token.GetProperty("token_type").GetString());
+        Assert.Equal(120, token.GetProperty("expires_in").GetInt32());
+        var issued = new JwtSecurityTokenHandler().ReadJwtToken(token.GetProperty("access_token").GetString());
+        Assert.Equal(exchange.Issuer, issued.Issuer);
+        Assert.Equal(Audience, Assert.Single(issued.Audiences));
+        Assert.Equal(WorkloadSubject, issued.Subject);
+
+        foreach (var assertion in new[]
+        {
+            Assertion(github, workflow: TrustedWorkflow.Replace("trusted.yml", "other.yml", StringComparison.Ordinal)),
+            Assertion(github, repository: "7654321"),
+            Assertion(github, branch: "refs/heads/other"),
+            Assertion(github, eventName: "pull_request"),
+            Assertion(github, eventName: "pull_request_target"),
+            Assertion(github, environment: "other"),
+            Assertion(github, jobWorkflow: TrustedWorkflow.Replace("trusted.yml", "reusable.yml", StringComparison.Ordinal)),
+            Assertion(github, issuer: "https://wrong.example"),
+            Assertion(github, audience: "urn:hosting:wrong"),
+            Assertion(github, expired: true),
+            Assertion(wrongKey)
+        })
+        {
+            using var denied = await Exchange(http, exchange.Endpoint, assertion);
+            Assert.Equal(HttpStatusCode.BadRequest, denied.StatusCode);
+            var error = await denied.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("invalid_grant", error.GetProperty("error").GetString());
+            Assert.False(error.TryGetProperty("access_token", out _));
+        }
+
+        using var wrongResource = await Exchange(http, exchange.Endpoint, Assertion(github), "https://wrong.example/mcp");
+        Assert.Equal(HttpStatusCode.BadRequest, wrongResource.StatusCode);
+    }
+
+    private static async Task<HttpResponseMessage> Exchange(HttpClient http, Uri endpoint, string assertion, string resource = Audience)
+    {
+        using var request = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = LoopbackTokenExchange.GrantType,
+            ["subject_token_type"] = LoopbackTokenExchange.JwtType,
+            ["requested_token_type"] = LoopbackTokenExchange.AccessTokenType,
+            ["resource"] = resource, ["scope"] = WorkloadScope, ["subject_token"] = assertion
+        });
+        return await http.PostAsync(endpoint, request);
+    }
+
+    private static string Assertion(RSA signing, string workflow = TrustedWorkflow, string repository = "1234567",
+        string branch = "refs/heads/main", string eventName = "push", string issuer = GitHubWorkloadTrust.Issuer,
+        string audience = AssertionAudience, bool expired = false, string environment = "trusted", string? jobWorkflow = null)
+    {
+        var claims = new List<Claim>
+        {
+            new("sub", WorkloadSubject), new("workflow_ref", workflow), new("repository_id", repository),
+            new("ref", branch), new("event_name", eventName), new("environment", environment)
+        };
+        if (jobWorkflow is not null)
+        {
+            claims.Add(new Claim("job_workflow_ref", jobWorkflow));
+        }
+
+        var now = DateTime.UtcNow;
+        var key = new RsaSecurityKey(signing) { KeyId = "github" };
+        var assertion = new JwtSecurityToken(issuer, audience, claims, now.AddMinutes(-2), now.AddMinutes(expired ? -1 : 2),
+            new SigningCredentials(key, SecurityAlgorithms.RsaSha256));
+        return new JwtSecurityTokenHandler().WriteToken(assertion);
+    }
 
     [Fact]
     public async Task WorkloadCanRecoverOnlyItsAdmissionAndRevocationDeniesReplayAndDispatch()
     {
         using var fixture = new BrokerFixture();
+        using var github = RSA.Create(2048);
+        await using var exchange = await fixture.StartExchangeAsync(_ =>
+            Task.FromResult<IEnumerable<SecurityKey>>([new RsaSecurityKey(github) { KeyId = "github" }]));
+        using var authorityHttp = fixture.ConnectMcpHttp(exchange.Endpoint);
+        using var issued = await Exchange(authorityHttp, exchange.Endpoint, Assertion(github));
+        issued.EnsureSuccessStatusCode();
+        var accessToken = (await issued.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("access_token").GetString()!;
         fixture.SetWorkloadPolicy(DateTimeOffset.UtcNow.AddMinutes(10));
         fixture.RegisterWorker("primary");
-        using var human = await fixture.StartAsync(WorkloadSubject, workload: true);
-        await using var host = await fixture.StartMcpAsync(workload: true);
+        using var human = await fixture.StartAsync(WorkloadSubject);
+        await using var host = await fixture.StartMcpAsync();
         var endpoint = new Uri(new Uri(host.Urls.Single()), "/mcp");
-        using var http = fixture.ConnectMcpToken(endpoint, fixture.WorkloadToken());
+        using var http = fixture.ConnectMcpToken(endpoint, accessToken);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var ct = timeout.Token;
         await using var client = await ConnectMcp(endpoint, http, ct);
@@ -669,6 +758,16 @@ public sealed class BrokerHttpTests
         private readonly Dictionary<string, X509Certificate2> workers = new(StringComparer.Ordinal);
         private WebApplication? app;
         private int keyRequests;
+        private string? exchangeIssuer;
+
+        public async Task<LoopbackTokenExchange> StartExchangeAsync(Func<CancellationToken, Task<IEnumerable<SecurityKey>>> githubKeys)
+        {
+            var trust = new GitHubWorkloadTrust(AssertionAudience, "1234567", TrustedWorkflow, "refs/heads/main", "push", "trusted");
+            var exchange = new LoopbackTokenExchange(trust, githubKeys, server, Audience, WorkloadScope, WorkloadSubject);
+            await exchange.StartAsync();
+            exchangeIssuer = exchange.Issuer;
+            return exchange;
+        }
 
         public string MetadataIssuer { get; set; } = Issuer;
         public int KeyRequests => Volatile.Read(ref keyRequests);
@@ -696,7 +795,7 @@ public sealed class BrokerHttpTests
             Assert.Equal(1, change.ExecuteNonQuery());
         }
 
-        public async Task<HttpClient> StartAsync(string subject, bool workload = false)
+        public async Task<HttpClient> StartAsync(string subject)
         {
             var certificatePath = Path.Combine(directory.FullName, "server.pfx");
             File.WriteAllBytes(certificatePath, server.Export(X509ContentType.Pfx));
@@ -719,9 +818,9 @@ public sealed class BrokerHttpTests
                 settings[$"Broker:Workers:{lane}:CertificateSha256"] = certificate.GetCertHashString(HashAlgorithmName.SHA256);
             }
 
-            if (workload)
+            if (exchangeIssuer is { } issuer)
             {
-                settings["Broker:Authentication:Workload:Issuer"] = WorkloadIssuer;
+                settings["Broker:Authentication:Workload:Issuer"] = issuer;
                 settings["Broker:Authentication:Workload:Scope"] = WorkloadScope;
             }
             builder.Configuration.AddInMemoryCollection(settings);
@@ -733,7 +832,7 @@ public sealed class BrokerHttpTests
             return Connect(Token(subject));
         }
 
-        public async Task<WebApplication> StartMcpAsync(bool workload = false)
+        public async Task<WebApplication> StartMcpAsync()
         {
             var edgePolicy = Path.Combine(directory.FullName, "edge-policy.json");
             var edgeCertificate = Path.Combine(directory.FullName, "edge.pfx");
@@ -752,9 +851,9 @@ public sealed class BrokerHttpTests
                 ["Kestrel:Endpoints:Fixture:Url"] = "https://127.0.0.1:0",
                 ["Kestrel:Certificates:Default:Path"] = Path.Combine(directory.FullName, "server.pfx")
             });
-            if (workload)
+            if (exchangeIssuer is { } issuer)
             {
-                builder.Configuration["Mcp:Authentication:Workload:Issuer"] = WorkloadIssuer;
+                builder.Configuration["Mcp:Authentication:Workload:Issuer"] = issuer;
                 builder.Configuration["Mcp:Authentication:Workload:Scope"] = WorkloadScope;
             }
             builder.Services.ConfigureAll<JwtBearerOptions>(
@@ -825,18 +924,6 @@ public sealed class BrokerHttpTests
             return new JwtSecurityTokenHandler().WriteToken(token);
         }
 
-        public string WorkloadToken()
-        {
-            var now = DateTime.UtcNow;
-            var key = new RsaSecurityKey(signing) { KeyId = "fixture" };
-            var token = new JwtSecurityToken(WorkloadIssuer, Audience,
-                [new("sub", WorkloadSubject), new("scope", WorkloadScope),
-                 new("iat", EpochTime.GetIntDate(now).ToString(System.Globalization.CultureInfo.InvariantCulture), ClaimValueTypes.Integer64)],
-                now.AddSeconds(-1), now.AddMinutes(2), new SigningCredentials(key, SecurityAlgorithms.RsaSha256));
-            token.Header["typ"] = "at+jwt";
-            return new JwtSecurityTokenHandler().WriteToken(token);
-        }
-
         public void SetWorkloadPolicy(DateTimeOffset? expiresUtc) => SetRawPolicy(JsonSerializer.Serialize(new
         {
             version = 1,
@@ -844,7 +931,7 @@ public sealed class BrokerHttpTests
             people = new[] { new { id = WorkloadSubject, identities = new[] { new { issuer = Issuer, subject = WorkloadSubject } }, grants = Array.Empty<object>() } },
             workload = expiresUtc is null ? null : new
             {
-                id = WorkloadSubject, identity = new { issuer = WorkloadIssuer, subject = WorkloadSubject },
+                id = WorkloadSubject, identity = new { issuer = exchangeIssuer, subject = WorkloadSubject },
                 expiresUtc, project = "demo", grants = new[] { new { project = "demo", lane = "primary", actions = new[] { "start", "read" } } }
             }
         }));
@@ -919,13 +1006,23 @@ public sealed class BrokerHttpTests
             public void Advance() => Interlocked.Add(ref extraMinutes, 6);
         }
 
-        private sealed class DiscoveryHandler(BrokerFixture fixture) : HttpMessageHandler
+        private sealed class DiscoveryHandler : HttpClientHandler
         {
+            private readonly BrokerFixture fixture;
+
+            public DiscoveryHandler(BrokerFixture fixture)
+            {
+                this.fixture = fixture;
+                AllowAutoRedirect = false;
+                ServerCertificateCustomValidationCallback = (_, certificate, _, _) => fixture.server.Equals(certificate);
+            }
+
             protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {
-                if (request.RequestUri?.AbsoluteUri == WorkloadIssuer + "/.well-known/openid-configuration")
+                if (fixture.exchangeIssuer is { } issuer &&
+                    request.RequestUri?.GetLeftPart(UriPartial.Authority) == issuer)
                 {
-                    return Reply(new { issuer = WorkloadIssuer, jwks_uri = WorkloadIssuer + "/jwks" });
+                    return base.SendAsync(request, cancellationToken);
                 }
 
                 if (request.RequestUri?.AbsoluteUri == Issuer + "/.well-known/openid-configuration")
@@ -933,11 +1030,8 @@ public sealed class BrokerHttpTests
                     return Reply(new { issuer = fixture.MetadataIssuer, jwks_uri = Issuer + "/jwks" });
                 }
 
-                if (request.RequestUri?.AbsoluteUri != WorkloadIssuer + "/jwks")
-                {
-                    Assert.Equal(Issuer + "/jwks", request.RequestUri?.AbsoluteUri);
-                    Interlocked.Increment(ref fixture.keyRequests);
-                }
+                Assert.Equal(Issuer + "/jwks", request.RequestUri?.AbsoluteUri);
+                Interlocked.Increment(ref fixture.keyRequests);
                 var key = fixture.signing.ExportParameters(false);
                 return Reply(new
                 {
