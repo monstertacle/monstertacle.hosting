@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
@@ -37,6 +39,7 @@ internal sealed class IssuerDiscovery(string issuer, HttpClient backchannel, Tim
                 }
 
                 var keyDocument = await documents.GetDocumentAsync(configuration.JwksUri, cancellationToken);
+                configuration.SigningKeys.Clear();
                 foreach (var key in JsonWebKeySet.Create(keyDocument).Keys.Where(IsSigningKey))
                 {
                     configuration.SigningKeys.Add(key);
@@ -63,7 +66,9 @@ internal sealed class IssuerDiscovery(string issuer, HttpClient backchannel, Tim
 
     public static bool AcceptsAlgorithm(string algorithm, SecurityKey key, SecurityToken _,
         TokenValidationParameters __) =>
-        key is JsonWebKey jwk &&
+        key is JsonWebKey jwk && AcceptsAlgorithm(algorithm, jwk);
+
+    private static bool AcceptsAlgorithm(string algorithm, JsonWebKey jwk) =>
         (string.IsNullOrEmpty(jwk.Alg) || jwk.Alg == algorithm) &&
         (jwk.Kty, algorithm) switch
         {
@@ -74,7 +79,47 @@ internal sealed class IssuerDiscovery(string issuer, HttpClient backchannel, Tim
             _ => false
         };
 
-    private static bool IsSigningKey(JsonWebKey key) =>
-        (key.Kty is "RSA" or "EC") && (string.IsNullOrEmpty(key.Use) || key.Use == "sig") &&
-        (key.KeyOps.Count == 0 || key.KeyOps.Contains("verify", StringComparer.Ordinal));
+    private static bool IsSigningKey(JsonWebKey key)
+    {
+        if ((!string.IsNullOrEmpty(key.Use) && key.Use != "sig") ||
+            (key.KeyOps.Count > 0 && !key.KeyOps.Contains("verify", StringComparer.Ordinal)))
+        {
+            return false;
+        }
+
+        var algorithm = string.IsNullOrEmpty(key.Alg) ? (key.Kty, key.Crv) switch
+        {
+            ("RSA", _) => "RS256",
+            ("EC", "P-256") => "ES256",
+            ("EC", "P-384") => "ES384",
+            ("EC", "P-521") => "ES512",
+            _ => ""
+        } : key.Alg;
+        if (!AcceptsAlgorithm(algorithm, key) ||
+            !JsonWebKeyConverter.TryConvertToSecurityKey(key, out var converted))
+        {
+            return false;
+        }
+
+        if (converted is RsaSecurityKey rsa)
+        {
+            try
+            {
+                using var imported = RSA.Create(rsa.Parameters);
+                return imported.KeySize >= 2048;
+            }
+            catch (CryptographicException)
+            {
+                return false;
+            }
+        }
+
+        if (converted is X509SecurityKey certificate)
+        {
+            using var publicKey = certificate.Certificate.GetRSAPublicKey();
+            return publicKey is { KeySize: >= 2048 };
+        }
+
+        return converted is ECDsaSecurityKey;
+    }
 }

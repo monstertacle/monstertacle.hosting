@@ -48,6 +48,24 @@ render_compose() {
     done
 }
 
+verify_public_compose_override() {
+    local stack=$1 hostname=edge.example.net
+    local -a public_compose=("${compose[@]}" --file "$repo/deploy/public-ingress/compose.yaml")
+    HOSTING_PUBLIC_HOSTNAME="$hostname" "${public_compose[@]}" config --format json > "$scratch/public-compose.json"
+    jq -e --arg hostname "$hostname" --slurpfile base "$scratch/$stack.json" '
+        . == ($base[0] | .services.edge.environment += {
+            Mcp__PublicIngress__Enabled: "true",
+            Mcp__PublicIngress__Hostname: $hostname
+        })
+    ' "$scratch/public-compose.json" >/dev/null || fail "Public ingress override changed the base deployment."
+    if env -u HOSTING_PUBLIC_HOSTNAME "${public_compose[@]}" --env-file /dev/null config --quiet \
+        > "$scratch/public-compose-missing.log" 2>&1; then
+        fail "Public ingress override accepted a missing hostname."
+    fi
+    grep -Fq 'Set HOSTING_PUBLIC_HOSTNAME' "$scratch/public-compose-missing.log" ||
+        fail "Public ingress override did not reject the missing hostname during interpolation."
+}
+
 quadlet_generator() {
     local candidate
     for candidate in /usr/lib/systemd/user-generators/podman-user-generator \

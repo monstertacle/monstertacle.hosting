@@ -1,0 +1,5 @@
+services:
+  edge:
+    environment:
+      Mcp__PublicIngress__Enabled: "true"
+      Mcp__PublicIngress__Hostname: "${HOSTING_PUBLIC_HOSTNAME:?Set HOSTING_PUBLIC_HOSTNAME}"

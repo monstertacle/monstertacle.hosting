@@ -183,6 +183,7 @@ else
         done
     } > "$scratch/$restored-volumes.yaml"
     render_compose "$project"
+    verify_public_compose_override "$project"
     render_compose "$restored"
 fi
 printf 'Preflight passed for %s.\n' "$engine"
