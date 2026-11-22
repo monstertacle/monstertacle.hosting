@@ -72,6 +72,12 @@ EOF_NETWORK
         /realms/hosting/clients-registrations/openid-connect /realms/hosting/login-actions/registration /health; do
         [[ "$(keycloak_request -o /dev/null -w '%{http_code}' "$KEYCLOAK_PUBLIC_ORIGIN$path")" == 404 ]]
     done
+    [[ "$(keycloak_request -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+        --data '{}' "$issuer/clients-registrations/openid-connect")" == 404 ]]
+    status=$(keycloak_request -o "$scratch/public-password.json" -w '%{http_code}' \
+        --data 'grant_type=password&client_id=example-hosting' "$issuer/protocol/openid-connect/token")
+    [[ "$status" == 400 ]]
+    jq -e '.access_token == null and .error == "unauthorized_client"' "$scratch/public-password.json" >/dev/null
 
     phase="Keycloak account creation"
     keycloak_request --fail --data 'grant_type=password&client_id=admin-cli&username=temporary-admin' \
@@ -99,12 +105,13 @@ EOF_NETWORK
 }
 
 keycloak_code() {
-    local user=$1 client=$2 test_case=$3 directory status login_url redirect encoded remainder
+    local user=$1 client=$2 test_case=$3 directory status login_url query redirect encoded remainder
     local protocol="$issuer/protocol/openid-connect"
     directory=$(mktemp -d "$scratch/oauth.XXXXXXXX")
     openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' > "$directory/verifier"
     openssl dgst -sha256 -binary "$directory/verifier" |
         openssl base64 -A | tr '+/' '-_' | tr -d '=' > "$directory/challenge"
+    phase="Keycloak authorization request ($test_case)"
     status=$(keycloak_request -o "$directory/login.html" -w '%{http_code}' -c "$directory/cookies" -G \
         --data-urlencode "client_id=$client" --data-urlencode "redirect_uri=$callback" \
         --data 'response_type=code' --data-urlencode 'scope=openid sessions' \
@@ -112,8 +119,10 @@ keycloak_code() {
         "$protocol/auth")
     [[ "$status" == 200 ]]
     login_url=$(sed -nE 's/.*id="kc-form-login"[^>]*action="([^"]+)".*/\1/p' "$directory/login.html" | sed 's/\&amp;/\&/g')
-    [[ "$login_url" == "$issuer/login-actions/authenticate?"* && "$login_url" != *['"'\$'\n'\\]* ]]
+    query=${login_url#"$issuer/login-actions/authenticate?"}
+    [[ "$login_url" == "$issuer/login-actions/authenticate?"* && "$query" =~ ^[A-Za-z0-9._~%=\&+-]+$ ]]
     printf 'url = "%s"\n' "$login_url" > "$directory/login.curl"
+    phase="Keycloak browser form submission ($test_case)"
     status=$(keycloak_request -D "$directory/headers" -o "$directory/login-result" -w '%{http_code}' \
         -b "$directory/cookies" --data-urlencode "username=$user" \
         --data-urlencode "password@$scratch/$user.password" --config "$directory/login.curl")
@@ -131,6 +140,7 @@ keycloak_code() {
             ;;
         *) verifier=(--data-urlencode "code_verifier@$directory/verifier") ;;
     esac
+    phase="Keycloak authorization code redemption ($test_case)"
     status=$(keycloak_request -o "$directory/token.json" -w '%{http_code}' --data 'grant_type=authorization_code' \
         --data-urlencode "client_id=$client" --data-urlencode "redirect_uri=$callback" \
         --data-urlencode "code@$directory/code" "${verifier[@]}" "$protocol/token")
@@ -140,6 +150,7 @@ keycloak_code() {
         return
     fi
     [[ "$status" == 200 ]]
+    phase="Keycloak access token claims ($test_case)"
     encoded=$(jq -er '.access_token | split(".")[1]' "$directory/token.json" | tr '_-' '/+')
     remainder=$(( ${#encoded} % 4 ))
     if (( remainder > 0 )); then printf -v encoded '%s%.*s' "$encoded" "$((4 - remainder))" '==='; fi
