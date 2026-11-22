@@ -7,6 +7,30 @@ keycloak_request() {
         --cacert "$KEYCLOAK_CA_FILE" --resolve identity.example.test:9443:127.0.0.1 "$@"
 }
 
+keycloak_startup_diagnostics() {
+    local status=$1
+    printf 'Keycloak discovery returned HTTP %s.\n' "${status:-unavailable}" >&3
+    "${keycloak_compose[@]}" ps --all --format json 2>/dev/null |
+        jq -rs 'flatten | .[] | select(.Service | IN("proxy","keycloak","database"))
+            | "\(.Service) \(.State) \(.Health // "")"' >&3 || true
+    "${keycloak_compose[@]}" logs --no-color --tail 60 > "$scratch/startup-diagnostics" 2>&1 || true
+    if grep -Eqi 'permission denied|not readable|cannot load certificate' "$scratch/startup-diagnostics"; then
+        printf '%s\n' 'A mounted Keycloak reference file could not be accessed.' >&3
+    fi
+    if grep -Eqi 'password authentication failed|failed to obtain JDBC|database .* does not exist' "$scratch/startup-diagnostics"; then
+        printf '%s\n' 'Keycloak could not authenticate to its database.' >&3
+    fi
+    if grep -Eqi 'host not found in upstream|could not resolve host' "$scratch/startup-diagnostics"; then
+        printf '%s\n' 'The proxy could not resolve its private upstream.' >&3
+    fi
+    if grep -Eqi 'unknown directive|invalid number of arguments|pcre.*failed' "$scratch/startup-diagnostics"; then
+        printf '%s\n' 'The proxy rejected its configuration.' >&3
+    fi
+    if grep -Eqi 'failed to start|initialization error|failed to import|failed to migrate' "$scratch/startup-diagnostics"; then
+        printf '%s\n' 'Keycloak reported a startup, import or migration failure.' >&3
+    fi
+}
+
 start_keycloak_fixture() {
     local attempt status path user
     export KEYCLOAK_CONFIG_DIR="$scratch/keycloak"
@@ -60,7 +84,11 @@ EOF_NETWORK
         [[ "$status" != 200 ]] || break
         sleep 1
     done
-    [[ "$status" == 200 ]]
+    if [[ "$status" != 200 ]]; then
+        keycloak_startup_diagnostics "$status"
+        return 1
+    fi
+    phase="Keycloak RFC 8414 discovery"
     keycloak_request --fail -o "$scratch/authorization-server.json" \
         "$KEYCLOAK_PUBLIC_ORIGIN/.well-known/oauth-authorization-server/realms/hosting"
     for path in discovery authorization-server; do
