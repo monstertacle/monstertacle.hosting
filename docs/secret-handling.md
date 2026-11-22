@@ -6,6 +6,10 @@ credentials, private keys, confidential data, and session or authentication stat
 out of sources, tests, documentation, examples, Git history, logs, artifacts, caches
 and images. Ignore rules are only one safeguard.
 
+Keep actual deployment hostnames, network addresses, and account identifiers in
+private operator configuration. Review the exact staged changes for these details
+as well as credentials. The staged scanner cannot identify site-specific values.
+
 Before **every** commit, review the exact staged diff in a private terminal and run
 the scan from the repository root. Both are mandatory. Repeat both after any change
 to the index, including conflict resolution or an amendment.

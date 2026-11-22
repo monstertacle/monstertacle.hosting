@@ -56,7 +56,18 @@ fi
     printf 'The Keycloak container mount files have unexpected permissions.\n' >&2
     exit 1
 }
+if ! cmp -s - <(find model-worker -mindepth 1 ! -type d -printf '%p %y\n' | LC_ALL=C sort) <<'EOF_MODELS'
+model-worker/README.md f
+model-worker/compose.yaml f
+model-worker/quadlet/50-model.conf f
+model-worker/worker.env.example f
+EOF_MODELS
+then
+    printf 'Unexpected model worker bundle entries.\n' >&2
+    exit 1
+fi
 "$engine" load --input "$assets/$images"
 bash ./quickstart.sh "$mode"
 bash ./quickstart.sh "$mode" enrollment
+bash ./quickstart.sh "$mode" model
 if [[ "$mode" == compose ]]; then bash ./quickstart.sh compose keycloak; fi

@@ -48,3 +48,8 @@ __pycache__/
 .ruff_cache/
 .venv/
 .DS_Store
+
+# Private model worker inputs
+worker.env
+worker-secondary.env
+model-bearer

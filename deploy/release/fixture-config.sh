@@ -94,3 +94,25 @@ EOF_ENV
     signed_header "$subject" "$resource" "$scratch/wrong-issuer.header" "$issuer/wrong"
     rm -- "$scratch/signing.key"
 }
+
+prepare_model_fixture() {
+    local lane role
+    for lane in primary secondary; do
+        role=worker
+        if [[ "$lane" == secondary ]]; then role=worker-secondary; fi
+        openssl rand -hex 32 > "$scratch/model-$lane"
+        install -m 0444 "$scratch/model-$lane" "$HOSTING_CONFIG_DIR/issuer/model-$lane"
+        install -m 0444 "$scratch/model-$lane" "$HOSTING_CONFIG_DIR/$role/model-bearer"
+        rm -- "$scratch/model-$lane"
+        sed -i "s/^Worker__Profile=.*/Worker__Profile=fixture-$lane@v1/" "$HOSTING_CONFIG_DIR/$role.env"
+        cat >> "$HOSTING_CONFIG_DIR/$role.env" <<EOF_MODEL
+Model__ProfileId=fixture-$lane
+Model__Revision=v1
+Model__Endpoint=$issuer/v1/chat/completions
+Model__ModelId=fixture-$lane
+Model__Instructions=Use the fixture-$lane profile.
+Model__OutputTokenLimit=64
+Model__BearerFile=/run/hosting/model-bearer
+EOF_MODEL
+    done
+}

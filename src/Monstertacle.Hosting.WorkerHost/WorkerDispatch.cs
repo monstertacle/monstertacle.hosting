@@ -7,8 +7,11 @@ using Monstertacle.Multisession.Contracts;
 namespace Monstertacle.Hosting.WorkerHost;
 
 internal sealed class WorkerDispatch(
-    WorkerLedger ledger, WorkerBrokerClient broker, SessionRuntime runtime, string profile, bool supportsCancellation)
+    WorkerLedger ledger, WorkerBrokerClient broker, SessionRuntime runtime, string profile, bool supportsCancellation,
+    ILogger<WorkerDispatch>? logger = null)
 {
+    private Guid? warnedFence;
+
     public async Task PollAsync(CancellationToken token)
     {
         var (mutation, claim) = ledger.Read();
@@ -91,6 +94,12 @@ internal sealed class WorkerDispatch(
         }
 
         var evidence = ToEvidence(request, unsupported);
+        if (request.Certainty == ExecutionCertainty.Unknown && warnedFence != claim.Fence)
+        {
+            logger?.LogWarning("Worker job {JobId} has an unconfirmed outcome. The assignment is retained for reconciliation.", claim.JobId);
+            warnedFence = claim.Fence;
+        }
+
         if (request.State != RequestState.Running && request.Certainty != ExecutionCertainty.Unknown)
         {
             await broker.CompleteAsync(claim, CreateCompletion(claim, evidence, request.Result), token);

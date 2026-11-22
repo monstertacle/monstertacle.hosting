@@ -90,8 +90,8 @@ and start `hosting-edge.service`, `hosting-worker.service` and
 distinct state volumes. The default private qualification port in both
 templates is `127.0.0.1:8443`.
 
-The worker image contains the deterministic profiles. Before live use,
-qualify the deployment-owned agent composition and complete loopback
+The worker image starts in deterministic mode by default. Before live use,
+qualify the configured model profile or deployment-owned composition, then complete loopback
 preflight with the approved external issuer, grants and ACME material.
 The [public ingress runbook](https://github.com/monstertacle/monstertacle.hosting/tree/main/deploy/public-ingress)
 covers the separately authorized activation.
@@ -108,3 +108,10 @@ For a standalone issuer with Docker Compose, see the
 It includes a static OAuth client manifest example for a shared MCP endpoint.
 Run `bash quickstart.sh compose keycloak` to check repeatable rendering and
 exercise the public and confidential registrations with a disposable issuer.
+
+### Optional model worker
+
+See [Configured model workers](model-worker/README.md) in the extracted bundle.
+The `model` fixture mode runs on hosted Compose and Quadlet runners and checks
+two model profiles against a disposable HTTPS fixture. Use separately managed
+credentials and configuration for any real gateway.

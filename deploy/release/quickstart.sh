@@ -7,9 +7,14 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 case "${1:-}" in
     compose) engine=docker ;;
     quadlet) engine=podman ;;
-    *) fail "Usage: bash quickstart.sh compose|quadlet [enrollment|keycloak]" ;;
+    *) fail "Usage: bash quickstart.sh compose|quadlet [enrollment|keycloak|model]" ;;
 esac
 enrollment=${2:-}
+model=false
+if [[ "$enrollment" == model ]]; then
+    model=true
+    enrollment=''
+fi
 [[ $# -le 2 && ( -z "$enrollment" || "$enrollment" == enrollment ||
     ( "$engine" == docker && "$enrollment" == keycloak ) ) &&
     "$(uname -sm)" == 'Linux x86_64' ]] || fail "Select one supported fixture mode on Linux x86-64."
@@ -38,6 +43,8 @@ compose=(docker compose --project-name "$project" --env-file /dev/null
     -f "$bundle/compose.yaml")
 if [[ "$enrollment" != keycloak ]]; then compose+=(-f "$bundle/fixture/compose.yaml"); fi
 if [[ -n "$enrollment" ]]; then compose+=(-f "$bundle/enrollment/compose.yaml"); fi
+
+if [[ "$model" == true ]]; then compose+=(-f "$bundle/model-worker/compose.yaml"); fi
 
 cleanup() {
     local status=$? role kind name
@@ -115,6 +122,7 @@ if [[ "$enrollment" == keycloak ]]; then
     start_keycloak_fixture > "$scratch/keycloak.log" 2>&1
 fi
 make_fixture > "$scratch/bootstrap.log" 2>&1
+if [[ "$model" == true ]]; then prepare_model_fixture > "$scratch/model.log" 2>&1; fi
 if [[ "$enrollment" == keycloak ]]; then
     for header in granted unlisted wrong-audience; do
         cp -- "$scratch/keycloak-$header.header" "$scratch/$header.header"
@@ -130,7 +138,11 @@ start_fixture() {
     if [[ "$engine" == docker ]]; then
         "${compose[@]}" config --quiet
         started=true
-        "${compose[@]}" up --detach --no-build --pull never
+        if [[ "$model" == true ]]; then
+            "${compose[@]}" up --detach --no-build --pull never broker edge issuer
+        else
+            "${compose[@]}" up --detach --no-build --pull never
+        fi
     else
         [[ "$(podman info --format '{{.Host.Security.Rootless}}')" == true ]] || fail "Use rootless Podman."
         mkdir -p "${XDG_RUNTIME_DIR:?}/containers/systemd"
@@ -138,10 +150,21 @@ start_fixture() {
         render_quadlet_files "$project" "$units" "$bundle/quadlet"
         render_quadlet_files "$project" "$units" "$bundle/fixture/quadlet"
         if [[ -n "$enrollment" ]]; then render_enrollment_dropins; fi
+        if [[ "$model" == true ]]; then
+            for role in worker worker-secondary; do
+                mkdir "$units/$project-$role.container.d"
+                sed "s/^Network=hosting-/Network=$project-/" "$bundle/model-worker/quadlet/50-model.conf" \
+                    > "$units/$project-$role.container.d/50-model.conf"
+            done
+        fi
         systemctl --user daemon-reload
         started=true
         local -a services=()
-        for role in "${roles[@]}"; do services+=("$project-$role.service"); done
+        for role in "${roles[@]}"; do
+            if [[ "$model" != true || "$role" != worker* ]]; then
+                services+=("$project-$role.service")
+            fi
+        done
         systemctl --user start "${services[@]}"
     fi
 }
@@ -151,20 +174,29 @@ trap - ERR
 exec 3>&-
 
 # Check provisioned storage identities in the running engine before asserting results.
-for role in "${state_roles[@]}"; do
-    expected_volume=$(volume_name "$project" "$role")
-    if [[ "$engine" == docker ]]; then
-        container=$("${compose[@]}" ps --quiet "$role")
-    else
-        container="systemd-$project-$role"
-    fi
-    "$engine" container inspect "$container" | jq -e --arg volume "$expected_volume" '
-        .[0] | [.Mounts[] | select(.Type=="volume")] as $mounts
-        | .State.Running and .HostConfig.ReadonlyRootfs and .Config.User == "1654"
-        and ((.HostConfig.PortBindings // {}) | length == 0)
-        and ($mounts | length == 1 and .[0].Name == $volume and .[0].Destination == "/var/lib/hosting")
-    ' >/dev/null || fail "Unexpected state mount or port for $role."
-done
+verify_mounts() {
+    local role expected_volume container
+    for role in "$@"; do
+        expected_volume=$(volume_name "$project" "$role")
+        if [[ "$engine" == docker ]]; then
+            container=$("${compose[@]}" ps --quiet "$role")
+        else
+            container="systemd-$project-$role"
+        fi
+        "$engine" container inspect "$container" | jq -e --arg volume "$expected_volume" '
+            .[0] | [.Mounts[] | select(.Type=="volume")] as $mounts
+            | .State.Running and .HostConfig.ReadonlyRootfs and .Config.User == "1654"
+            and ((.HostConfig.PortBindings // {}) | length == 0)
+            and ($mounts | length == 1 and .[0].Name == $volume and .[0].Destination == "/var/lib/hosting")
+        ' >/dev/null || fail "Unexpected state mount or port for $role."
+    done
+}
+
+if [[ "$model" == true ]]; then
+    verify_mounts broker
+else
+    verify_mounts "${state_roles[@]}"
+fi
 
 post() {
     local header=$1
@@ -208,7 +240,7 @@ done
 [[ "$ready" == true ]] || fail "Timed out waiting for authenticated MCP initialization."
 
 start_args() {
-    jq -cn --arg mutationId "$(cat /proc/sys/kernel/random/uuid)" '{mutationId:$mutationId,project:"fixture",task:"release fixture"}'
+    jq -cn --arg mutationId "$(cat /proc/sys/kernel/random/uuid)" --arg task "${1:-release fixture}" '{mutationId:$mutationId,project:"fixture",task:$task}'
 }
 
 tool session_start "$(start_args)"
@@ -221,39 +253,62 @@ tool session_start "$(start_args)"
 [[ "$(post unlisted)" == 403 ]] || fail "Unlisted subject session start did not return 403."
 printf 'Admission denied for anonymous, wrong-issuer, wrong-audience and unlisted requests.\n'
 
-tool session_start "$(start_args)"
-[[ "$(post granted)" == 200 ]] || fail "Granted session start did not return 200."
-session=$(read_result | jq -er '.structuredContent.sessionId | select(type=="string")') ||
-    fail "Granted session start did not return a session ID."
-printf 'Granted JWT admitted a session through the MCP edge.\n'
+start_session() {
+    tool session_start "$(start_args "$1")"
+    [[ "$(post granted)" == 200 ]] || fail "Granted session start did not return 200."
+    read_result | jq -er '.structuredContent.sessionId | select(type=="string")' ||
+        fail "Granted session start did not return a session ID."
+}
 
-session_args=$(jq -cn --arg sessionId "$session" '{sessionId:$sessionId}')
-tool session_result "$session_args"
-complete=false
-for (( attempt=0; attempt<60; attempt++ )); do
-    if [[ "$(post granted)" == 200 ]] && read_result > "$scratch/manifest.json" &&
-        jq -e --arg session "$session" '
-            .structuredContent | (.sha256 | test("^[0-9a-f]{64}$"))
-            and (.manifest | .complete and .sessionId == $session
-                and ([.jobs[].status.lane] | sort == ["primary","secondary"])
-                and all(.jobs[]; .status.state == "succeeded" and .result.manifest.artifacts[0].name == "output"))
-        ' "$scratch/manifest.json" >/dev/null 2>&1; then
-        complete=true
-        break
+verify_session() {
+    local session=$1 profile=$2 task=$3 session_args complete attempt lane job
+    session_args=$(jq -cn --arg sessionId "$session" '{sessionId:$sessionId}')
+    tool session_result "$session_args"
+    complete=false
+    for (( attempt=0; attempt<60; attempt++ )); do
+        if [[ "$(post granted)" == 200 ]] && read_result > "$scratch/manifest.json" &&
+            jq -e --arg session "$session" '
+                .structuredContent | (.sha256 | test("^[0-9a-f]{64}$"))
+                and (.manifest | .complete and .sessionId == $session
+                    and ([.jobs[].status.lane] | sort == ["primary","secondary"])
+                    and all(.jobs[]; .status.state == "succeeded" and .result.manifest.artifacts[0].name == "output"))
+            ' "$scratch/manifest.json" >/dev/null 2>&1; then
+            complete=true
+            break
+        fi
+        sleep 1
+    done
+    [[ "$complete" == true ]] || fail "The broker did not return two successful lane results."
+    for lane in primary secondary; do
+        job=$(jq -er --arg lane "$lane" '.structuredContent.manifest.jobs[].status | select(.lane == $lane) | .jobId' "$scratch/manifest.json")
+        tool session_artifact "$(jq -c --arg jobId "$job" '. + {jobId:$jobId,name:"output"}' <<< "$session_args")"
+        [[ "$(post granted)" == 200 ]] || fail "Artifact read failed for $lane."
+        read_result | jq -er '.structuredContent | select(.artifact.name == "output") | .content' |
+            base64 --decode > "$scratch/artifact" || fail "Invalid artifact for $lane."
+        printf '%s-%s: %s' "$profile" "$lane" "$task" | cmp --silent - "$scratch/artifact" ||
+            fail "Unexpected output for $lane."
+    done
+    printf 'Both worker lanes succeeded. Verified result and both artifacts retrieved (%s).\n' "$mode"
+}
+
+mode=$1
+if [[ "$model" == true ]]; then
+    first=$(start_session 'first model task')
+    second=$(start_session 'second model task')
+    [[ "$first" != "$second" ]]
+    # Admit both sessions before either model worker starts.
+    if [[ "$engine" == docker ]]; then
+        "${compose[@]}" up --detach --no-deps --no-build --pull never worker worker-secondary
+    else
+        systemctl --user start "$project-worker.service" "$project-worker-secondary.service"
     fi
-    sleep 1
-done
-[[ "$complete" == true ]] || fail "The broker did not return two successful lane results."
-for lane in primary secondary; do
-    job=$(jq -er --arg lane "$lane" '.structuredContent.manifest.jobs[].status | select(.lane == $lane) | .jobId' "$scratch/manifest.json")
-    tool session_artifact "$(jq -c --arg jobId "$job" '. + {jobId:$jobId,name:"output"}' <<< "$session_args")"
-    [[ "$(post granted)" == 200 ]] || fail "Artifact read failed for $lane."
-    read_result | jq -er '.structuredContent | select(.artifact.name == "output") | .content' |
-        base64 --decode > "$scratch/artifact" || fail "Invalid artifact for $lane."
-    printf 'deterministic-%s: release fixture' "$lane" | cmp --silent - "$scratch/artifact" ||
-        fail "Unexpected deterministic output for $lane."
-done
-printf 'Both worker lanes succeeded. Verified result and both artifacts retrieved (%s).\n' "$1"
+    verify_mounts worker worker-secondary
+    verify_session "$first" fixture 'first model task'
+    verify_session "$second" fixture 'second model task'
+else
+    session=$(start_session 'release fixture')
+    verify_session "$session" deterministic 'release fixture'
+fi
 if [[ -n "$enrollment" ]]; then
     if ! verify_enrollment > "$scratch/enrollment.log" 2>&1; then
         fail 'Enrollment lifecycle or atomic update checks failed.'

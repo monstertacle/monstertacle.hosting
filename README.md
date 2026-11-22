@@ -156,6 +156,10 @@ before submitting anything. Broker status distinguishes cancellation intent,
 unsupported cancellation, and confirmed execution outcomes. An uncertain
 execution retains its assignment pending recovery evidence.
 
+The chiseled deployment bundle also supports an opt-in
+[configured text model worker](deploy/model-worker/README.md) using the same
+broker and client workflow.
+
 #### Deployment-owned agents
 
 For an AgentFramework deployment, reference the WorkerHost project from a
