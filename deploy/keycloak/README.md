@@ -20,6 +20,11 @@ private tunnel. The database, Keycloak HTTP connector and management
 interface have no published port.
 
 Set the paths and origins from the extracted release directory.
+Preserve the verified archive's file modes during extraction. If your
+extraction tool applies a restrictive umask, restore mode `0755` on
+`keycloak/init-database.sh` and mode `0644` on `keycloak/start-reference.sh`
+and `keycloak/nginx.conf`. These three public files are mounted into services
+that run with their own user IDs.
 
 ```sh
 umask 077

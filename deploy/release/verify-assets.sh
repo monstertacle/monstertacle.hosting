@@ -21,7 +21,7 @@ trap 'rm -rf -- "$scratch"' EXIT
 mapfile -t sums < "$assets/SHA256SUMS"
 [[ ${#sums[@]} == 2 && "${sums[0]:66}" == "$bundle" && "${sums[1]:66}" == "$images" ]]
 (cd -- "$assets" && sha256sum --strict --check SHA256SUMS)
-tar -xzf "$assets/$bundle" -C "$scratch"
+tar --same-permissions -xzf "$assets/$bundle" -C "$scratch"
 cd -- "$scratch/$name"
 [[ "$(cat version)" == "$tag" ]]
 if [[ -n "$revision" ]]; then [[ "$(cat revision)" == "$revision" ]]; fi
@@ -49,6 +49,12 @@ then
     printf 'Unexpected enrollment or Keycloak bundle entries.\n' >&2
     exit 1
 fi
+[[ "$(stat -c %a keycloak/init-database.sh)" == 755 &&
+    "$(stat -c %a keycloak/start-reference.sh)" == 644 &&
+    "$(stat -c %a keycloak/nginx.conf)" == 644 ]] || {
+    printf 'The Keycloak container mount files have unexpected permissions.\n' >&2
+    exit 1
+}
 "$engine" load --input "$assets/$images"
 bash ./quickstart.sh "$mode"
 bash ./quickstart.sh "$mode" enrollment
