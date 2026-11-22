@@ -30,7 +30,7 @@ render_enrollment_dropins() {
 }
 
 verify_enrollment() {
-    local one two initial status=0
+    local one two initial second_session status=0
     initial=$(stat -c '%i' -- "$policy") || return 1
     enroll first && [[ "$(stat -c '%i' -- "$policy")" == "$initial" ]] || return 1
 
@@ -38,7 +38,7 @@ verify_enrollment() {
     if enroll conflict; then return 1; fi
     [[ "$(stat -c '%i' -- "$policy")" == "$initial" ]] || return 1
 
-    jq '.id = "second" | .subject = "unlisted" | .grants |= map(.actions = ["start"])' \
+    jq '.id = "second" | .subject = "unlisted" | .grants |= map(.actions = ["start","read"])' \
         "$scratch/first.json" > "$scratch/second.json"
     jq '.id = "third" | .subject = "fixture-third"' "$scratch/first.json" > "$scratch/third.json"
     enroll second & one=$!
@@ -59,9 +59,12 @@ verify_enrollment() {
     mv -fT -- "$scratch/last-good.json" "$policy"
 
     tool session_start "$(start_args)"
-    [[ "$(post unlisted)" == 200 ]] && read_result >/dev/null || return 1
-    tool session_list '{"project":"fixture"}'
+    [[ "$(post unlisted)" == 200 ]] || return 1
+    second_session=$(read_result | jq -er '.structuredContent.sessionId | select(type == "string")') || return 1
+    tool session_result "$(jq -cn --arg id "$second_session" '{sessionId:$id}')"
     [[ "$(post unlisted)" == 200 ]] && ! read_result >/dev/null || return 1
+    jq -e '.result.isError == true and (.result.content[0].text | endswith("The requested session is unavailable."))' \
+        "$scratch/rpc.json" >/dev/null || return 1
 
     jq '.operation = "revoke" | del(.grants)' "$scratch/first.json" > "$scratch/revoke.json"
     enroll revoke || return 1
