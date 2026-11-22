@@ -55,7 +55,7 @@ start_keycloak_fixture() {
 
     callback=http://127.0.0.1:19876/mcp/oauth/callback
     bash "$bundle/keycloak/render-realm.sh" "$resource" example-hosting "$callback" |
-        jq '.clients += [(.clients[0] | .clientId = "wrong-audience" | .protocolMappers = [
+        jq '.clients += [(.clients[0] | .clientId = "wrong-audience" | .protocolMappers += [
             {name:"Extra audience",protocol:"openid-connect",protocolMapper:"oidc-audience-mapper",
                 config:{"included.custom.audience":"https://other.example.test/mcp","access.token.claim":"true"}}
         ])]' > "$KEYCLOAK_CONFIG_DIR/realm.json"

@@ -47,9 +47,15 @@ jq -n --arg audience "$resource" --arg client "$client" --arg redirect "$callbac
     implicitFlowEnabled: false,
     serviceAccountsEnabled: false,
     fullScopeAllowed: false,
-    defaultClientScopes: ["basic"],
+    defaultClientScopes: [],
     optionalClientScopes: ["sessions"],
-    attributes: {"pkce.code.challenge.method":"S256"}
+    attributes: {"pkce.code.challenge.method":"S256"},
+    protocolMappers: [{
+      name: "Stable local user subject",
+      protocol: "openid-connect",
+      protocolMapper: "oidc-sub-mapper",
+      config: {"access.token.claim":"true", "introspection.token.claim":"true"}
+    }]
   }],
   clientScopes: [{
     name: "sessions",
