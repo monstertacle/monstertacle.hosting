@@ -58,7 +58,7 @@ jobs:
           ref: ${{ github.sha }}
           submodules: recursive
           persist-credentials: false
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14c95bf1 # v5
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           global-json-file: global.json
       - name: Check the expected tool ID and version
@@ -141,7 +141,7 @@ jobs:
           printf '%s  %s\n' "$PACKAGE_SHA256" "$PACKAGE_FILE" | sha256sum --check --strict
       - name: Set up the SDK used to verify the package
         if: inputs.mode == 'release'
-        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14c95bf1 # v5
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
           dotnet-version: ${{ needs.verify.outputs.sdk_version }}
       - name: Exchange GitHub identity for a short-lived NuGet key
