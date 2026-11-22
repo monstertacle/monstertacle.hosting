@@ -105,6 +105,7 @@ together across restarts.
 Each project admits up to 256 sessions with pending or authorized work.
 
 ## MCP Streamable HTTP
+For workstation setup and session recovery, see [Use Hosting from Codex CLI](docs/codex-cli.md).
 
 The MCP host consumes the .NET 11 target of the MIT-licensed Communication
 adapter at the public revision pinned in `dependencies/communication`. Its
