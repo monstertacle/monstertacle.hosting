@@ -56,17 +56,25 @@ for target in control-plane mcp-host worker-host fixture-issuer; do
     refs+=("$ref")
 done
 
-for ref in "${refs[@]}"; do
-    id=$("$engine" image inspect --format '{{.Id}}' "$ref")
-    printf '%s\tsha256:%s\n' "$ref" "${id#sha256:}"
-done > "$bundle/image-ids.tsv"
-
 # Supply both engines a Docker archive with the same image names and IDs.
 if [[ "$engine" == docker ]]; then
     docker image save "${refs[@]}"
 else
     podman save --format docker-archive --multi-image-archive "${refs[@]}"
 fi | gzip -n > "$output/$name-images.tar.gz"
+
+# Containerd-backed Docker reports the manifest digest. Podman and classic
+# Docker report the digest of the archived image configuration.
+tar -xOzf "$output/$name-images.tar.gz" manifest.json > "$work/image-manifest.json"
+for ref in "${refs[@]}"; do
+    id=$("$engine" image inspect --format '{{.Id}}' "$ref")
+    config=$(jq -er --arg ref "$ref" '.[] | select(.RepoTags | index($ref)) | .Config' "$work/image-manifest.json")
+    config=${config##*/}
+    config=${config%.json}
+    [[ "$config" =~ ^[0-9a-f]{64}$ ]]
+    printf '%s\tsha256:%s\tsha256:%s\n' "$ref" "${id#sha256:}" "$config"
+done > "$bundle/image-ids.tsv"
+
 tar -C "$work" -czf "$output/$name-bundle.tar.gz" "$name"
 (
     cd -- "$output"

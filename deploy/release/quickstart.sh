@@ -72,16 +72,18 @@ if [[ ! "$HOSTING_EDGE_PORT" =~ ^[1-9][0-9]{3,4}$ ]] ||
 fi
 
 verify_images() {
-    local tag ref expected actual target
+    local tag ref build_id config_id actual platform target
     tag=$(cat "$bundle/version")
     [[ "$tag" =~ ^deploy-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "Invalid bundle version."
     for target in control-plane mcp-host worker-host fixture-issuer; do
         ref="localhost/monstertacle-hosting-$target:$tag"
-        expected=$(awk -F '\t' -v ref="$ref" '$1==ref {print $2}' "$bundle/image-ids.tsv")
-        [[ "$expected" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "Invalid image manifest entry for $target."
-        actual=$("$engine" image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "$ref" 2>/dev/null) ||
+        read -r build_id config_id < <(awk -F '\t' -v ref="$ref" '$1==ref {print $2, $3}' "$bundle/image-ids.tsv")
+        [[ "$build_id" =~ ^sha256:[0-9a-f]{64}$ && "$config_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+            fail "Invalid image manifest entry for $target."
+        read -r actual platform < <("$engine" image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "$ref" 2>/dev/null) ||
             fail "Load the verified image archive before running the fixture."
-        [[ "sha256:${actual#sha256:}" == "$expected linux/amd64" ]] ||
+        actual=sha256:${actual#sha256:}
+        [[ "$platform" == linux/amd64 && ( "$actual" == "$build_id" || "$actual" == "$config_id" ) ]] ||
             fail "The loaded $target image differs from the bundle manifest."
     done
 }
@@ -129,10 +131,10 @@ for role in "${state_roles[@]}"; do
         container="systemd-$project-$role"
     fi
     "$engine" container inspect "$container" | jq -e --arg volume "$expected_volume" '
-        .[0] | .State.Running and .HostConfig.ReadonlyRootfs and .Config.User == "1654"
+        .[0] | [.Mounts[] | select(.Type=="volume")] as $mounts
+        | .State.Running and .HostConfig.ReadonlyRootfs and .Config.User == "1654"
         and ((.HostConfig.PortBindings // {}) | length == 0)
-        and ([.Mounts[] | select(.Type=="volume")]) as $mounts
-        | ($mounts | length == 1 and .[0].Name == $volume and .[0].Destination == "/var/lib/hosting")
+        and ($mounts | length == 1 and .[0].Name == $volume and .[0].Destination == "/var/lib/hosting")
     ' >/dev/null || fail "Unexpected state mount or port for $role."
 done
 
