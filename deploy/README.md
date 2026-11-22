@@ -27,6 +27,9 @@ IPv4 TCP socket and OAuth activation checks.
 See the [lifecycle runbook](lifecycle.md) for certificate replacement,
 coordinated stopped backup and restore, cutover and rollback.
 
+For the source-free Linux release and disposable two-worker quickstart, see
+the [deployment bundle guide](release/README.md).
+
 ## Configuration
 
 Start from a recursive checkout so the pinned Communication source and license

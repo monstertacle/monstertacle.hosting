@@ -13,5 +13,10 @@
 !dependencies/communication/src/Monstertacle.Communication.Mcp/
 !dependencies/communication/src/Monstertacle.Communication.Mcp/*.cs
 !dependencies/communication/src/Monstertacle.Communication.Mcp/*.csproj
+!tests/
+!tests/fixtures/
+!tests/fixtures/ReleaseIssuer/
+!tests/fixtures/ReleaseIssuer/*.cs
+!tests/fixtures/ReleaseIssuer/*.csproj
 **/bin/
 **/obj/

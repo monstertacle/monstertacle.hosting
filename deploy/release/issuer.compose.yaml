@@ -1,0 +1,11 @@
+services:
+  issuer:
+    image: localhost/monstertacle-hosting-fixture-issuer:RELEASE_TAG
+    pull_policy: never
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - "${HOSTING_CONFIG_DIR:?Set HOSTING_CONFIG_DIR}/issuer:/run/discovery:ro"
+    networks: [private]

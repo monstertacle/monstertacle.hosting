@@ -115,19 +115,25 @@ verify_quadlet_container() {
     fi
 }
 
-render_quadlet() {
-    local stack=$1 directory=$2 unit filename role rendered="$scratch/$1.units"
+render_quadlet_files() {
+    local stack=$1 directory=$2 templates=$3 image_prefix=${4:-monstertacle-hosting} unit filename
     # These fixture paths are substituted into Quadlet directives and parsed as single arguments.
     [[ "$HOSTING_CONFIG_DIR" =~ ^/[a-zA-Z0-9._/-]+$ ]] || fail "Use a simple absolute TMPDIR for Quadlet smoke."
     mkdir -p "$directory"
-    for unit in "$repo"/deploy/quadlet/*.{container,volume,network}; do
+    for unit in "$templates"/*.{container,volume,network}; do
+        [[ -f "$unit" ]] || continue
         filename=${unit##*/}
-        sed -E -e "s|localhost/monstertacle-hosting-|localhost/$project-|g" \
+        sed -E -e "s|localhost/monstertacle-hosting-|localhost/$image_prefix-|g" \
             -e "s@^(After|Requires|Network|Volume)=hosting-@\1=$stack-@" \
             -e "s|%h/\.config/monstertacle-hosting|$HOSTING_CONFIG_DIR|g" \
             -e "s|^PublishPort=127\.0\.0\.1:8443:8443$|PublishPort=127.0.0.1:$HOSTING_EDGE_PORT:8443|" \
             "$unit" > "$directory/$stack-${filename#hosting-}"
     done
+}
+
+render_quadlet() {
+    local stack=$1 directory=$2 role rendered="$scratch/$1.units"
+    render_quadlet_files "$stack" "$directory" "$repo/deploy/quadlet" "$project"
     QUADLET_UNIT_DIRS="$directory" "$(quadlet_generator)" -user -dryrun \
         > "$rendered" 2> "$scratch/$stack.generator.log" || fail "Quadlet fixture rendering failed."
     for role in broker worker edge; do
@@ -137,4 +143,17 @@ render_quadlet() {
     grep -Eq "^ExecStart=[^ ]+ volume create --ignore $(volume_name "$stack" broker)$" "$rendered"
     grep -Eq "^ExecStart=[^ ]+ volume create --ignore $(volume_name "$stack" worker)$" "$rendered"
     grep -Eq "^ExecStart=[^ ]+ network create --ignore --internal systemd-$stack-private$" "$rendered"
+}
+
+certificate() {
+    local name=$1 dns=$2 purpose=$3
+    openssl req -x509 -newkey rsa:2048 -noenc -days 1 -subj "/CN=$dns" \
+        -addext "subjectAltName=DNS:$dns" -addext "extendedKeyUsage=$purpose" \
+        -keyout "$scratch/$name.key" -out "$scratch/$name.pem" 2>/dev/null
+    openssl pkcs12 -export -out "$scratch/$name.pfx" -inkey "$scratch/$name.key" \
+        -in "$scratch/$name.pem" -passout pass:
+}
+
+fingerprint() {
+    openssl x509 -in "$scratch/$1.pem" -outform DER | openssl dgst -sha256 -r | cut -d ' ' -f 1
 }
