@@ -68,6 +68,8 @@ cleanup() {
         select_stack "$name"
         if [[ "$engine" == podman ]]; then
             stack_units stop >&2 || status=1
+            systemctl --user stop "$name-broker-state-volume.service" "$name-worker-state-volume.service" \
+                "$name-private-network.service" "$name-outbound-network.service" >&2 || status=1
             for role in broker worker; do
                 volume=$(volume_name "$name" "$role")
                 if podman volume exists "$volume"; then
