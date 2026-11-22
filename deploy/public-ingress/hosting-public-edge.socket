@@ -1,0 +1,12 @@
+[Unit]
+Description=Hosting public HTTPS socket
+Wants=network-online.target
+After=network-online.target
+
+[Socket]
+# Replace the documentation address, hostname and issuer consistently before installing.
+ListenStream=192.0.2.10:443
+Accept=no
+FreeBind=no
+ExecStartPre=/usr/bin/bash /usr/local/libexec/hosting-public-edge-preflight edge.example.net 192.0.2.10 28443 https://identity.example.net
+TimeoutSec=75s

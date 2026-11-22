@@ -39,6 +39,39 @@ public sealed class BrokerHttpTests
     private const string AssertionAudience = "urn:hosting:fixture";
     private const string TrustedWorkflow = "example/hosting/.github/workflows/trusted.yml@refs/heads/main";
 
+    [Fact]
+    public async Task PublicIngressRequiresHumanGrantAndValidIssuerDiscovery()
+    {
+        using var fixture = new BrokerFixture();
+        fixture.SetPolicy();
+        using var broker = await fixture.StartAsync("allowed");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.StartMcpAsync(publicIngress: true));
+
+        fixture.SetPolicy("allowed");
+        fixture.MetadataIssuer = Issuer + "/different";
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.StartMcpAsync(publicIngress: true));
+
+        fixture.MetadataIssuer = Issuer;
+        fixture.UseInvalidSigningKey = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.StartMcpAsync(publicIngress: true));
+
+        fixture.UseInvalidSigningKey = false;
+        await using var host = await fixture.StartMcpAsync(publicIngress: true);
+        var origin = new Uri(host.Urls.Single());
+        using var anonymous = fixture.ConnectMcpHttp(origin);
+        using var readiness = await anonymous.GetAsync("/.well-known/hosting-ingress-readiness");
+        Assert.Equal(HttpStatusCode.NoContent, readiness.StatusCode);
+        using var denied = await anonymous.PostAsJsonAsync("/mcp", new { });
+        Assert.Equal(HttpStatusCode.Unauthorized, denied.StatusCode);
+        using var http = fixture.ConnectMcpHttp(origin, "allowed");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await using var mcp = await ConnectMcp(new Uri(origin, "/mcp"), http, deadline.Token);
+        Assert.Contains(await mcp.ListToolsAsync(cancellationToken: deadline.Token), tool => tool.Name == "session_start");
+        var project = new Dictionary<string, object?> { ["project"] = "demo" };
+        var page = ReadMcp<SessionPage>(await mcp.CallToolAsync("session_list", project, cancellationToken: deadline.Token));
+        Assert.Empty(page.Sessions);
+    }
+
     [HostedGitHubFact]
     public async Task HostedGitHubOidcSmoke()
     {
@@ -1096,6 +1129,7 @@ public sealed class BrokerHttpTests
         }
 
         public string MetadataIssuer { get; set; } = Issuer;
+        public bool UseInvalidSigningKey { get; set; }
         public int KeyRequests => Volatile.Read(ref keyRequests);
         public string WorkerDirectory => Path.Combine(directory.FullName, "worker");
 
@@ -1158,11 +1192,11 @@ public sealed class BrokerHttpTests
             return Connect(Token(subject));
         }
 
-        public async Task<WebApplication> StartMcpAsync()
+        public async Task<WebApplication> StartMcpAsync(bool publicIngress = false)
         {
             var edgePolicy = Path.Combine(directory.FullName, "edge-policy.json");
             var edgeCertificate = Path.Combine(directory.FullName, "edge.pfx");
-            File.Copy(PolicyPath, edgePolicy);
+            File.Copy(PolicyPath, edgePolicy, overwrite: true);
             File.WriteAllBytes(edgeCertificate, edge.Export(X509ContentType.Pfx));
             var builder = WebApplication.CreateBuilder();
             builder.Logging.ClearProviders();
@@ -1171,6 +1205,8 @@ public sealed class BrokerHttpTests
                 ["Mcp:Authentication:Issuer"] = Issuer,
                 ["Mcp:Authentication:Audience"] = Audience,
                 ["Mcp:Authentication:Scope"] = Scope,
+                ["Mcp:PublicIngress:Enabled"] = publicIngress.ToString(),
+                ["Mcp:PublicIngress:Hostname"] = new Uri(Audience).Host,
                 ["Mcp:PolicyFile"] = edgePolicy,
                 ["Mcp:BrokerUrl"] = app!.Urls.Single(),
                 ["Mcp:BrokerClientCertificateFile"] = edgeCertificate,
@@ -1189,8 +1225,16 @@ public sealed class BrokerHttpTests
                     ((HttpClientHandler)handler.PrimaryHandler).ServerCertificateCustomValidationCallback =
                     (_, cert, _, _) => server.Equals(cert)));
             var host = McpApplication.Build(builder);
-            await host.StartAsync();
-            return host;
+            try
+            {
+                await host.StartAsync();
+                return host;
+            }
+            catch
+            {
+                await host.DisposeAsync();
+                throw;
+            }
         }
 
         public HttpClient ConnectMcpHttp(Uri endpoint, string? subject = null) =>
@@ -1446,7 +1490,8 @@ public sealed class BrokerHttpTests
                     keys = new[] { new
                     {
                         kty = "RSA", kid = "fixture", use = "sig", alg = "RS256",
-                        n = Base64UrlEncoder.Encode(key.Modulus), e = Base64UrlEncoder.Encode(key.Exponent)
+                        n = fixture.UseInvalidSigningKey ? "AQ" : Base64UrlEncoder.Encode(key.Modulus),
+                        e = Base64UrlEncoder.Encode(key.Exponent)
                     } }
                 });
             }

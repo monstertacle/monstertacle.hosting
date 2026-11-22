@@ -30,7 +30,12 @@ public static class McpApplication
         }
 
         var policy = new BrokerPolicy(settings, tokens.WorkloadIssuer);
+        var publicIngress = PublicIngress.Create(settings, tokens, policy);
         tokens.Configure(builder.Services, saveToken: true);
+        if (publicIngress is not null)
+        {
+            builder.Services.AddHostedService(services => new PublicIngress.StartupCheck(publicIngress, services));
+        }
         builder.Services.Configure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
             options.Events.OnChallenge = context =>
             {
@@ -79,6 +84,12 @@ public static class McpApplication
                     return;
                 }
 
+                if (publicIngress is not null && !publicIngress.HasHumanGrant())
+                {
+                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                    return;
+                }
+
                 if (context.User.Identity?.IsAuthenticated != true)
                 {
                     await context.ChallengeAsync();
@@ -110,6 +121,16 @@ public static class McpApplication
             bearer_methods_supported = new[] { "header" }
         }));
         app.MapMonstertacleMcp(McpRoute).RequireAuthorization();
+        if (publicIngress is not null)
+        {
+            app.MapGet("/.well-known/hosting-ingress-readiness", async (HttpContext context) =>
+            {
+                context.Response.Headers.CacheControl = "no-store";
+                return context.Request.IsHttps &&
+                    await publicIngress.IsReadyAsync(context.RequestServices, context.RequestAborted)
+                    ? Results.NoContent() : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            });
+        }
         return app;
     }
 }

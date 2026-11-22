@@ -21,6 +21,9 @@ HTTP-01 requires public TCP 80 for the challenge.
 [Kestrel endpoints](https://learn.microsoft.com/aspnet/core/fundamentals/servers/kestrel/endpoints)
 and [Let's Encrypt challenge types](https://letsencrypt.org/docs/challenge-types/).
 
+See the [public ingress runbook](public-ingress/README.md) for the dedicated
+IPv4 TCP socket and OAuth activation checks.
+
 See the [lifecycle runbook](lifecycle.md) for certificate replacement,
 coordinated stopped backup and restore, cutover and rollback.
 
@@ -68,6 +71,8 @@ docker compose -f deploy/compose.yaml up --build --detach
 The edge listens on `127.0.0.1:8443` by default. Set `HOSTING_EDGE_PORT` for
 another local port. Use `docker compose -f deploy/compose.yaml down` to stop
 the deployment while retaining state volumes.
+For public deployment, layer the [ingress override](public-ingress/README.md#prepare-identity-and-edge-configuration)
+over the base file and qualify the edge on loopback before starting the system socket.
 
 ## Rootless Podman Quadlet
 

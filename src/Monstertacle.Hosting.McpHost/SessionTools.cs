@@ -31,7 +31,8 @@ internal sealed class SessionTools
     [Description("List sessions in a project. Use the returned nextAfter value to retrieve the next page.")]
     public static Task<SessionPage> List(string project, BrokerSessionClient broker, CancellationToken cancellationToken,
         Guid? after = null, int limit = 20) =>
-        broker.Send<SessionPage>(HttpMethod.Get, $"{Route}?project={Uri.EscapeDataString(project)}&after={after:D}&limit={limit}",
+        broker.Send<SessionPage>(HttpMethod.Get, $"{Route}?project={Uri.EscapeDataString(project)}&limit={limit}" +
+            (after is { } cursor ? $"&after={cursor:D}" : ""),
             null, cancellationToken);
 
     [McpServerTool(Name = "session_cancel", UseStructuredContent = true, Destructive = true)]
