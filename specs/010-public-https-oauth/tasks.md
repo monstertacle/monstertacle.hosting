@@ -7,4 +7,5 @@
 - [x] Verify systemd units and qualify the isolated rootless deployment with trusted Kestrel TLS, authenticated MCP, anonymous denial and negative readiness cases.
 - [x] Verify the Compose override changes only the edge readiness settings and requires a hostname.
 - [x] Verify all four CI jobs on the exact pull request head `cf7ebf4` and main merge commit `b071444`, then record the deployment evidence privately. [Pull request CI](https://github.com/monstertacle/monstertacle.hosting/actions/runs/45021219240) · [Main CI](https://github.com/monstertacle/monstertacle.hosting/actions/runs/45021381750) · [Hosted OIDC loopback smoke on main](https://github.com/monstertacle/monstertacle.hosting/actions/runs/45021395773)
+- [x] Document OpenCode and Pi workstation setup for Hosting over HTTPS, link all three client guides from the README, and reference the Codex guide for session submission and recovery.
 - [ ] Provision an independently operated production OIDC issuer, OAuth client and API registrations, and an explicit human allowlist with grants. Verify live browser and CLI access before activating public ingress.
