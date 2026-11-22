@@ -14,6 +14,15 @@ keycloak_startup_diagnostics() {
         jq -rs 'flatten | .[] | select(.Service | IN("proxy","keycloak","database"))
             | "\(.Service) \(.State) \(.Health // "")"' >&3 || true
     "${keycloak_compose[@]}" logs --no-color --tail 60 > "$scratch/startup-diagnostics" 2>&1 || true
+    if [[ -f "$scratch/keycloak-up.log" ]]; then
+        cat -- "$scratch/keycloak-up.log" >> "$scratch/startup-diagnostics"
+    fi
+    if grep -Eqi 'toomanyrequests|pull access denied|unauthorized|manifest unknown|failed to pull' "$scratch/startup-diagnostics"; then
+        printf '%s\n' 'An upstream image could not be pulled.' >&3
+    fi
+    if grep -Eqi 'address already in use|port is already allocated' "$scratch/startup-diagnostics"; then
+        printf '%s\n' 'A loopback fixture port is already in use.' >&3
+    fi
     if grep -Eqi 'permission denied|not readable|cannot load certificate' "$scratch/startup-diagnostics"; then
         printf '%s\n' 'A mounted Keycloak reference file could not be accessed.' >&3
     fi
@@ -75,7 +84,10 @@ EOF_NETWORK
     keycloak_compose=(docker compose --project-name "$project-id" --env-file /dev/null
         -f "$bundle/keycloak/compose.yaml" -f "$bundle/keycloak/bootstrap.compose.yaml" -f "$scratch/keycloak-network.yaml")
     keycloak_started=true
-    "${keycloak_compose[@]}" up --detach
+    if ! "${keycloak_compose[@]}" up --detach > "$scratch/keycloak-up.log" 2>&1; then
+        keycloak_startup_diagnostics unavailable
+        return 1
+    fi
 
     phase="Keycloak discovery"
     for ((attempt=0; attempt<90; attempt++)); do
