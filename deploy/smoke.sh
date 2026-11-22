@@ -411,7 +411,6 @@ previous_broker=$broker_identity previous_worker=$worker_identity previous_edge=
 certificate edge-replacement localhost serverAuth
 install -m 0644 "$scratch/edge-replacement.pfx" "$HOSTING_CONFIG_DIR/edge/server.next"
 mv -f "$HOSTING_CONFIG_DIR/edge/server.next" "$HOSTING_CONFIG_DIR/edge/server.pfx"
-since=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 if [[ "$engine" == podman ]]; then
     systemctl --user restart "$stack-edge.service"
 else
@@ -423,7 +422,11 @@ record_stage edge-replaced
     fail "Edge replacement changed the broker or worker, or reused the old edge container."
 old_request=("${request[@]}")
 request=(curl --silent --show-error --noproxy '*' --cacert "$scratch/edge-replacement.pem" --max-time 3)
+since=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 verify_transport "$since" "${broker_identity%%$'\t'*}"
+[[ "$(runtime_identity broker)" == "$previous_broker" &&
+    "$(runtime_identity worker)" == "$previous_worker" ]] ||
+    fail "Broker or worker identity changed during edge verification."
 if "${old_request[@]}" --fail "$base/health/live" >/dev/null 2>&1; then
     fail "Edge still presents the original TLS certificate."
 fi
