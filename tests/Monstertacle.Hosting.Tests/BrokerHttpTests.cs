@@ -23,6 +23,7 @@ using Monstertacle.Hosting.ControlPlane;
 using Monstertacle.Hosting.McpHost;
 using Monstertacle.Hosting.Security;
 using Monstertacle.Hosting.WorkerHost;
+using Monstertacle.Multisession;
 using Monstertacle.Multisession.Contracts;
 
 namespace Monstertacle.Hosting.Tests;
@@ -637,6 +638,166 @@ public sealed class BrokerHttpTests
         Assert.Equal(HttpStatusCode.NotFound, wrongLane.StatusCode);
     }
 
+    [Fact]
+    public async Task ConcurrentOwnerSessionsKeepExecutionAndResultsIsolated()
+    {
+        using var fixture = new BrokerFixture();
+        fixture.SetConcurrentOwnerPolicy();
+        fixture.RegisterWorker("primary");
+        fixture.RegisterWorker("secondary");
+        using var firstOwner = await fixture.StartAsync("first");
+        using var secondOwner = fixture.Connect(fixture.Token("second"));
+        using var firstClient = fixture.ConnectWorker("primary");
+        using var secondClient = fixture.ConnectWorker("secondary");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        var ct = timeout.Token;
+        var firstStart = new StartSession(Guid.NewGuid(), "first-project", "first task");
+        var secondStart = new StartSession(Guid.NewGuid(), "second-project", "second task");
+        using var firstResponse = await firstOwner.PostAsJsonAsync(Sessions, firstStart, ct);
+        using var secondResponse = await secondOwner.PostAsJsonAsync(Sessions, secondStart, ct);
+        var first = await ReadStatus(firstResponse);
+        var second = await ReadStatus(secondResponse);
+        var firstJob = Assert.Single(first.Jobs);
+        var secondJob = Assert.Single(second.Jobs);
+        Assert.NotEqual(first.SessionId, second.SessionId);
+        Assert.NotEqual(firstJob.JobId, secondJob.JobId);
+        Assert.Equal("primary", firstJob.Lane);
+        Assert.Equal("secondary", secondJob.Lane);
+
+        const string firstOutput = "first session output";
+        const string secondOutput = "second session output";
+        using var firstChat = new FixtureChatClient(firstStart.Task, firstOutput, holdResponse: true);
+        using var secondChat = new FixtureChatClient(secondStart.Task, secondOutput, holdResponse: true);
+        var firstBinding = Bind(firstChat);
+        var secondBinding = Bind(secondChat);
+        var firstRoot = fixture.WorkerDirectory;
+        var secondRoot = firstRoot + "-secondary";
+        await using var firstRuntime = await WorkerRuntime.OpenAsync(firstRoot, Guid.NewGuid(),
+            [firstBinding.Provider], [firstBinding.Profile], ct);
+        await using var secondRuntime = await WorkerRuntime.OpenAsync(secondRoot, Guid.NewGuid(),
+            [secondBinding.Provider], [secondBinding.Profile], ct);
+        var firstLedger = new WorkerLedger(firstRoot);
+        var secondLedger = new WorkerLedger(secondRoot);
+        var firstWorker = new WorkerDispatch(firstLedger, new WorkerBrokerClient(firstClient), firstRuntime, "fixture", false);
+        var secondWorker = new WorkerDispatch(secondLedger, new WorkerBrokerClient(secondClient), secondRuntime, "fixture", false);
+
+        await Task.WhenAll(firstWorker.PollAsync(ct), secondWorker.PollAsync(ct));
+        var firstClaim = Assert.IsType<JobClaim>(firstLedger.Read().Claim);
+        var secondClaim = Assert.IsType<JobClaim>(secondLedger.Read().Claim);
+        Assert.Equal((first.SessionId, firstJob.JobId), (firstClaim.SessionId, firstClaim.JobId));
+        Assert.Equal((second.SessionId, secondJob.JobId), (secondClaim.SessionId, secondClaim.JobId));
+        Assert.NotEqual(firstClaim.Fence, secondClaim.Fence);
+
+        // Both provider calls have started and neither can return before its own gate opens.
+        await Task.WhenAll(firstChat.Entered, secondChat.Entered).WaitAsync(ct);
+        await Task.WhenAll(firstWorker.PollAsync(ct), secondWorker.PollAsync(ct));
+        var firstRunning = await ReadResult(firstOwner, first.SessionId);
+        var secondRunning = await ReadResult(secondOwner, second.SessionId);
+        foreach (var running in new[] { firstRunning, secondRunning })
+        {
+            Assert.False(running.Manifest.Complete);
+            var job = Assert.Single(running.Manifest.Jobs);
+            Assert.Equal("running", job.Status.State);
+            Assert.Null(job.Result);
+        }
+
+        firstChat.Release();
+        await PublishCompletion(firstWorker, firstLedger);
+        var firstDone = await ReadResult(firstOwner, first.SessionId);
+        await VerifyOutput(firstOwner, firstJob, first.SessionId, firstDone, firstOutput);
+        Assert.Equal(secondRunning.Sha256, (await ReadResult(secondOwner, second.SessionId)).Sha256);
+        Assert.Equal(secondClaim, secondLedger.Read().Claim);
+        var secondRequest = await secondRuntime.Requests.GetRequestAsync(secondClaim.Fence, ct);
+        Assert.Equal(RequestState.Running, secondRequest?.State);
+        Assert.Null(secondRequest?.Result);
+
+        secondChat.Release();
+        await PublishCompletion(secondWorker, secondLedger);
+        var secondDone = await ReadResult(secondOwner, second.SessionId);
+        await VerifyOutput(secondOwner, secondJob, second.SessionId, secondDone, secondOutput);
+        Assert.Equal(firstDone.Sha256, (await ReadResult(firstOwner, first.SessionId)).Sha256);
+        await AssertOwnerDenied(firstOwner, second.SessionId, secondJob.JobId);
+        await AssertOwnerDenied(secondOwner, first.SessionId, firstJob.JobId);
+
+        // Poll again after completion to check that neither lane dispatches a second request.
+        await Task.WhenAll(firstWorker.PollAsync(ct), secondWorker.PollAsync(ct));
+        Assert.Null(firstLedger.Read().Claim);
+        Assert.Null(secondLedger.Read().Claim);
+        await VerifyRequest(firstRuntime, firstClaim, firstOutput);
+        await VerifyRequest(secondRuntime, secondClaim, secondOutput);
+        Assert.Null(await firstRuntime.Requests.GetRequestAsync(secondClaim.Fence, ct));
+        Assert.Null(await secondRuntime.Requests.GetRequestAsync(firstClaim.Fence, ct));
+        Assert.Equal(1, firstChat.Calls);
+        Assert.Equal(1, secondChat.Calls);
+
+        static WorkerRegistration Bind(FixtureChatClient chat) =>
+            WorkerRegistration.AgentFramework("fixture", "fixture-provider", "fixture-model", "1",
+                new() { AdapterId = "fixture-adapter" },
+                _ => new ChatClientAgent(chat, new ChatClientAgentOptions { Id = "fixture-agent", Name = "fixture" }));
+
+        async Task PublishCompletion(WorkerDispatch worker, WorkerLedger ledger)
+        {
+            while (ledger.Read().Claim is not null)
+            {
+                ct.ThrowIfCancellationRequested();
+                await worker.PollAsync(ct);
+                if (ledger.Read().Claim is not null)
+                {
+                    await Task.Delay(20, ct);
+                }
+            }
+        }
+
+        async Task<VerifiedSessionResult> ReadResult(HttpClient owner, Guid sessionId) =>
+            Assert.IsType<VerifiedSessionResult>(
+                await owner.GetFromJsonAsync<VerifiedSessionResult>($"{Sessions}/{sessionId}/result", ct));
+
+        async Task VerifyOutput(HttpClient owner, JobStatus admitted, Guid sessionId, VerifiedSessionResult result, string output)
+        {
+            var expected = Output(output);
+            var status = Assert.IsType<SessionStatus>(
+                await owner.GetFromJsonAsync<SessionStatus>($"{Sessions}/{sessionId}", ct));
+            var artifact = Assert.IsType<ArtifactContent>(
+                await owner.GetFromJsonAsync<ArtifactContent>(ArtifactPath(sessionId, admitted.JobId), ct));
+            Assert.Equal(sessionId, status.SessionId);
+            Assert.True(result.Manifest.Complete);
+            Assert.Equal(sessionId, result.Manifest.SessionId);
+            var job = Assert.Single(result.Manifest.Jobs);
+            Assert.Equal(job.Status, Assert.Single(status.Jobs));
+            Assert.Equal(admitted.JobId, job.Status.JobId);
+            Assert.Equal("succeeded", job.Status.State);
+            Assert.Equal("confirmed-ended", job.Status.ExecutionCertainty);
+            var manifest = Assert.IsType<VerifiedJobResult>(job.Result).Manifest;
+            Assert.Equal((sessionId, admitted.JobId), (manifest.SessionId, manifest.JobId));
+            Assert.Equal(new ArtifactDescriptor(expected.Name, expected.Bytes, expected.Sha256), artifact.Artifact);
+            Assert.Equal(artifact.Artifact, Assert.Single(manifest.Artifacts));
+            Assert.Equal(expected.Content, artifact.Content);
+        }
+
+        async Task AssertOwnerDenied(HttpClient caller, Guid sessionId, Guid jobId)
+        {
+            using var status = await caller.GetAsync($"{Sessions}/{sessionId}", ct);
+            using var result = await caller.GetAsync($"{Sessions}/{sessionId}/result", ct);
+            using var artifact = await caller.GetAsync(ArtifactPath(sessionId, jobId), ct);
+            Assert.Equal(HttpStatusCode.NotFound, status.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, result.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, artifact.StatusCode);
+        }
+
+        async Task VerifyRequest(SessionRuntime runtime, JobClaim claim, string output)
+        {
+            var requests = await runtime.Requests.ListRequestsAsync(claim.JobId, 2, null, ct);
+            var request = Assert.Single(requests.Items);
+            Assert.Null(requests.NextCursor);
+            Assert.Equal(claim.Fence, request.RequestId);
+            Assert.Equal(claim.JobId, request.SessionId);
+            Assert.Equal(RequestState.Succeeded, request.State);
+            Assert.Equal(output, request.Result?.Output);
+        }
+
+        static string ArtifactPath(Guid sessionId, Guid jobId) => $"{Sessions}/{sessionId}/jobs/{jobId}/artifacts/output";
+    }
+
     private static ArtifactUpload Output(string value)
     {
         var bytes = Encoding.UTF8.GetBytes(value);
@@ -732,21 +893,33 @@ public sealed class BrokerHttpTests
         Assert.Equal(HttpStatusCode.InternalServerError, corruptReplay.StatusCode);
     }
 
-    private sealed class FixtureChatClient : IChatClient
+    private sealed class FixtureChatClient(string prompt = "fixture", string output = "fixture output",
+        bool holdResponse = false) : IChatClient
     {
+        private readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int calls;
         public int Calls => Volatile.Read(ref calls);
+        public Task Entered => entered.Task;
 
-        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null,
+        public void Release() => release.TrySetResult();
+
+        public async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Assert.Contains(messages, message => message.Role == ChatRole.User && message.Text == "fixture");
+            Assert.Contains(messages, message => message.Role == ChatRole.User && message.Text == prompt);
             Interlocked.Increment(ref calls);
-            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "fixture output"))
+            entered.TrySetResult();
+            if (holdResponse)
+            {
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(40), cancellationToken);
+            }
+
+            return new ChatResponse(new ChatMessage(ChatRole.Assistant, output))
             {
                 FinishReason = ChatFinishReason.Stop
-            });
+            };
         }
 
         public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
@@ -1111,6 +1284,33 @@ public sealed class BrokerHttpTests
         private string PolicyPath => Path.Combine(directory.FullName, "policy.json");
 
         public void SetPolicy(params string[] names) => SetPolicyWithLanes(names, ["primary", "secondary"]);
+
+        public void SetConcurrentOwnerPolicy()
+        {
+            var projects = new[]
+            {
+                new { id = "first-project", lane = "primary", owner = "first" },
+                new { id = "second-project", lane = "secondary", owner = "second" }
+            };
+            SetRawPolicy(JsonSerializer.Serialize(new
+            {
+                version = 1,
+                projects = projects.Select(project => new { project.id, lanes = new[] { project.lane } }),
+                people = projects.Select(person => new
+                {
+                    id = person.owner,
+                    identities = new[] { new { issuer = Issuer, subject = person.owner } },
+                    grants = projects.Select(project => new
+                    {
+                        project = project.id,
+                        lane = project.lane,
+                        actions = person.owner == project.owner
+                            ? new[] { "start", "read", "result", "artifact" }
+                            : new[] { "read", "result", "artifact" }
+                    })
+                })
+            }));
+        }
 
         public void SetPolicyWithLanes(string[] names, string[] lanes) => SetRawPolicy(JsonSerializer.Serialize(new
         {
