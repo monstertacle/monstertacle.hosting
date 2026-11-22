@@ -1,0 +1,10 @@
+# Apply to the release bundle's two-worker topology.
+services:
+  worker:
+    environment:
+      Worker__Runtime: model-gateway
+    networks: [private, outbound]
+  worker-secondary:
+    environment:
+      Worker__Runtime: model-gateway
+    networks: [private, outbound]

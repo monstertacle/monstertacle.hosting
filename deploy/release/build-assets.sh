@@ -57,6 +57,9 @@ for path in "${reference_files[@]}"; do
     if [[ "$path" == keycloak/init-database.sh ]]; then mode=0755; fi
     install -m "$mode" "$repo/deploy/$path" "$bundle/$path"
 done
+mkdir -p "$bundle/model-worker/quadlet"
+install -m 0644 "$repo/deploy/model-worker/"{README.md,compose.yaml,worker.env.example} "$bundle/model-worker/"
+install -m 0644 "$repo/deploy/model-worker/quadlet/50-model.conf" "$bundle/model-worker/quadlet/"
 cp "$repo/deploy/smoke-config.sh" "$bundle/"
 cp "$repo/"{LICENSE,THIRD-PARTY-NOTICES.md} "$bundle/"
 sed "s/:RELEASE_TAG$/:$tag/" "$repo/deploy/release/issuer.compose.yaml" > "$bundle/fixture/compose.yaml"

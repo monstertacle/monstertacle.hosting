@@ -31,8 +31,9 @@ public static class WorkerApplication
             registrations.Select(registration => registration.Provider).ToArray(),
             registrations.Select(registration => registration.Profile).ToArray(), cancellationToken);
         var ledger = new WorkerLedger(directory);
-        builder.Services.AddSingleton(new WorkerDispatch(ledger, new WorkerBrokerClient(http), runtime,
-            selected.Profile.AgentProfileId, selected.Provider.Provider.Capabilities.SupportsCancellation));
+        builder.Services.AddSingleton(services => new WorkerDispatch(ledger, new WorkerBrokerClient(http), runtime,
+            selected.Profile.AgentProfileId, selected.Provider.Provider.Capabilities.SupportsCancellation,
+            services.GetRequiredService<ILogger<WorkerDispatch>>()));
         builder.Services.AddHostedService<WorkerPollingService>();
         var app = builder.Build();
         app.MapGet("/health/live", () => runtime.Completion.IsCompleted ? Results.StatusCode(503) : Results.NoContent());
