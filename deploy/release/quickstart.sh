@@ -7,9 +7,11 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 case "${1:-}" in
     compose) engine=docker ;;
     quadlet) engine=podman ;;
-    *) fail "Usage: bash quickstart.sh compose|quadlet" ;;
+    *) fail "Usage: bash quickstart.sh compose|quadlet [enrollment]" ;;
 esac
-[[ $# == 1 && "$(uname -sm)" == 'Linux x86_64' ]] || fail "Select one engine on Linux x86-64."
+enrollment=${2:-}
+[[ $# -le 2 && ( -z "$enrollment" || "$enrollment" == enrollment ) &&
+    "$(uname -sm)" == 'Linux x86_64' ]] || fail "Select one engine on Linux x86-64, optionally with enrollment."
 # Fixture credentials always live outside the extracted tree.
 bundle=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 scratch=$(mktemp -d /tmp/hosting-release.XXXXXXXX)
@@ -25,9 +27,12 @@ units=""
 source "$bundle/smoke-config.sh"
 # shellcheck source=deploy/release/fixture-config.sh
 source "$bundle/fixture-config.sh"
+# shellcheck source=deploy/release/fixture-enrollment.sh
+source "$bundle/fixture-enrollment.sh"
 
 compose=(docker compose --project-name "$project" --env-file /dev/null
     -f "$bundle/compose.yaml" -f "$bundle/fixture/compose.yaml")
+if [[ -n "$enrollment" ]]; then compose+=(-f "$bundle/enrollment/compose.yaml"); fi
 
 cleanup() {
     local status=$? role kind name
@@ -97,6 +102,10 @@ exec 3>&2
 phase="private bootstrap"
 trap 'printf "Fixture step failed: %s.\n" "$phase" >&3' ERR
 make_fixture > "$scratch/bootstrap.log" 2>&1
+if [[ -n "$enrollment" ]]; then
+    phase="first operator enrollment"
+    prepare_enrollment > "$scratch/enrollment.log" 2>&1
+fi
 
 start_fixture() {
     local role
@@ -110,6 +119,7 @@ start_fixture() {
         units=$(mktemp -d "$XDG_RUNTIME_DIR/containers/systemd/$project.XXXXXXXX")
         render_quadlet_files "$project" "$units" "$bundle/quadlet"
         render_quadlet_files "$project" "$units" "$bundle/fixture/quadlet"
+        if [[ -n "$enrollment" ]]; then render_enrollment_dropins; fi
         systemctl --user daemon-reload
         started=true
         local -a services=()
@@ -188,8 +198,10 @@ tool session_start "$(start_args)"
 tool session_start "$(start_args)"
 [[ "$(post wrong-audience)" == 401 ]] || fail "Wrong-audience session start did not return 401."
 tool session_start "$(start_args)"
+[[ "$(post wrong-issuer)" == 401 ]] || fail "Wrong-issuer session start did not return 401."
+tool session_start "$(start_args)"
 [[ "$(post unlisted)" == 403 ]] || fail "Unlisted subject session start did not return 403."
-printf 'Admission denied for anonymous, wrong-audience and unlisted requests.\n'
+printf 'Admission denied for anonymous, wrong-issuer, wrong-audience and unlisted requests.\n'
 
 tool session_start "$(start_args)"
 [[ "$(post granted)" == 200 ]] || fail "Granted session start did not return 200."
@@ -224,3 +236,9 @@ for lane in primary secondary; do
         fail "Unexpected deterministic output for $lane."
 done
 printf 'Both worker lanes succeeded. Verified result and both artifacts retrieved (%s).\n' "$1"
+if [[ -n "$enrollment" ]]; then
+    if ! verify_enrollment > "$scratch/enrollment.log" 2>&1; then
+        fail 'Enrollment lifecycle or atomic update checks failed.'
+    fi
+    printf 'Enrollment verified on the shared policy, including conflict, retry and revocation.\n'
+fi

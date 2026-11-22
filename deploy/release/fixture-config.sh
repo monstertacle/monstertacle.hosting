@@ -7,9 +7,9 @@ base64url() {
 }
 
 signed_header() {
-    local subject=$1 audience=$2 path=$3 now payload unsigned signature
+    local subject=$1 audience=$2 path=$3 token_issuer=${4:-$issuer} now payload unsigned signature
     now=$(date +%s)
-    payload=$(jq -cn --arg iss "$issuer" --arg aud "$audience" --arg sub "$subject" \
+    payload=$(jq -cn --arg iss "$token_issuer" --arg aud "$audience" --arg sub "$subject" \
         --argjson now "$now" '{iss:$iss,aud:$aud,sub:$sub,scope:"sessions",iat:$now,nbf:($now-5),exp:($now+300)}')
     unsigned="$(printf '{"alg":"RS256","kid":"local-fixture","typ":"JWT"}' | base64url).$(printf '%s' "$payload" | base64url)"
     signature=$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$scratch/signing.key" | base64url)
@@ -90,5 +90,6 @@ EOF_ENV
     signed_header "$subject" "$resource" "$scratch/granted.header"
     signed_header unlisted "$resource" "$scratch/unlisted.header"
     signed_header "$subject" "$resource/wrong-audience" "$scratch/wrong-audience.header"
+    signed_header "$subject" "$resource" "$scratch/wrong-issuer.header" "$issuer/wrong"
     rm -- "$scratch/signing.key"
 }

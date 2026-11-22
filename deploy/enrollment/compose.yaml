@@ -1,0 +1,23 @@
+services:
+  broker:
+    environment:
+      Broker__PolicyFile: /run/hosting-policy/policy.json
+    volumes:
+      - type: bind
+        source: ${HOSTING_CONFIG_DIR:?Set HOSTING_CONFIG_DIR}/policy
+        target: /run/hosting-policy
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+  edge:
+    environment:
+      Mcp__PolicyFile: /run/hosting-policy/policy.json
+    volumes:
+      - type: bind
+        source: ${HOSTING_CONFIG_DIR:?Set HOSTING_CONFIG_DIR}/policy
+        target: /run/hosting-policy
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z

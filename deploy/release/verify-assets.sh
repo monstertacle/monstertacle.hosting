@@ -31,3 +31,4 @@ if [[ -n "$(find . \( -name .git -o -name '*.cs' -o -name '*.csproj' -o -name Do
 fi
 "$engine" load --input "$assets/$images"
 bash ./quickstart.sh "$mode"
+bash ./quickstart.sh "$mode" enrollment

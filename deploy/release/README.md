@@ -95,3 +95,10 @@ qualify the deployment-owned agent composition and complete loopback
 preflight with the approved external issuer, grants and ACME material.
 The [public ingress runbook](https://github.com/monstertacle/monstertacle.hosting/tree/main/deploy/public-ingress)
 covers the separately authorized activation.
+
+## Human access enrollment
+
+Use the [operator enrollment guide](enrollment/README.md) to configure one
+shared policy directory and manage human access through the release image.
+The disposable release fixture also supports `bash quickstart.sh compose enrollment`
+and `bash quickstart.sh quadlet enrollment`.

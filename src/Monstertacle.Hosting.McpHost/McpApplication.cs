@@ -84,21 +84,21 @@ public static class McpApplication
                     return;
                 }
 
-                if (publicIngress is not null && !publicIngress.HasHumanGrant())
-                {
-                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                    return;
-                }
-
                 if (context.User.Identity?.IsAuthenticated != true)
                 {
                     await context.ChallengeAsync();
                     return;
                 }
 
-                if (policy.Resolve(context.User) is null)
+                if (policy.Resolve(context.User) is not { Person.Grants.Length: > 0 })
                 {
                     context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    return;
+                }
+
+                if (publicIngress is not null && !publicIngress.HasHumanGrant())
+                {
+                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                     return;
                 }
 
