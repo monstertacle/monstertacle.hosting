@@ -5,6 +5,7 @@ COPY src/ src/
 COPY dependencies/communication/src/Monstertacle.Communication.Mcp/ dependencies/communication/src/Monstertacle.Communication.Mcp/
 COPY dependencies/communication/LICENSE /licenses/Communication
 COPY LICENSE THIRD-PARTY-NOTICES.md /licenses/
+RUN install -d -m 0700 -o "$APP_UID" -g 0 /state/hosting
 
 FROM source AS build-broker
 RUN dotnet publish src/Monstertacle.Hosting.ControlPlane -c Release -o /publish -p:UseAppHost=false
@@ -15,9 +16,9 @@ RUN dotnet publish src/Monstertacle.Hosting.WorkerHost -c Release -o /publish -p
 FROM source AS build-edge
 RUN dotnet publish src/Monstertacle.Hosting.McpHost -c Release -o /publish -p:UseAppHost=false
 
-FROM mcr.microsoft.com/dotnet/aspnet:11.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:11.0-resolute-chiseled-extra AS runtime
 WORKDIR /app
-RUN install -d -m 0700 -o "$APP_UID" /var/lib/hosting
+COPY --from=source /state/ /var/lib/
 COPY --from=source /licenses /licenses
 USER $APP_UID
 

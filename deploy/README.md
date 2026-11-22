@@ -1,6 +1,8 @@
 # Deploy Monstertacle Hosting
 
-The Linux image has three build targets for .NET 11. The broker and worker
+The Linux image has three build targets for .NET 11. Each uses the Ubuntu
+26.04 chiseled extra ASP.NET Core runtime, which includes ICU, time-zone
+data and system CA roots. The broker and worker
 have no published ports. The MCP edge publishes HTTPS on loopback in the
 examples. The broker and edge join an outbound network for issuer discovery
 and JWKS. Publish the edge through a deployment-approved HTTPS ingress.
@@ -91,11 +93,26 @@ the Windows-specific native lease package and a private local directory.
 The image, Compose and Quadlet examples target Linux.
 
 `bash deploy/smoke.sh --config-only` validates Compose interpolation without
-a daemon. `bash deploy/smoke.sh` builds all three images and checks startup,
-native worker state, non-root process identity, OAuth resource metadata and an
-unauthenticated MCP response. It uses temporary certificates, an isolated
-Compose project and a loopback port. The application tests exercise the
-credential-free end-to-end session, worker and artifact protocol separately.
+a daemon. `bash deploy/smoke.sh` builds all three images and checks the
+read-only roots and certificate mounts, non-root runtime user, SQLite state,
+worker-to-broker mTLS, edge HTTPS, OAuth resource metadata and anonymous MCP
+denial. It uses temporary certificates, an isolated Compose project and a
+loopback port. The application tests exercise the credential-free
+end-to-end session, worker and artifact protocol separately.
+
+The rootless smoke variant, `bash deploy/smoke.sh --quadlet`, builds and
+starts temporary copies of the sample units under the user's systemd manager,
+with unique unit, image and volume names. It requires working rootless Podman,
+an active user manager and a free loopback port. Hosted CI runs it in an
+isolated Linux runner.
+
+## Debugging chiseled containers
+
+The runtime images have no shell or package manager. From the host, use
+`docker logs` or `podman logs` for startup errors, and engine `inspect` to
+check the configured user, mounts and networks. Use engine `cp` to retrieve
+specific files for local inspection. For a consistent SQLite backup, use the
+deployment's state backup procedure.
 
 ## Live acceptance
 
@@ -125,8 +142,3 @@ OAuth flow.
 Record platform, exact revision, client types, scenario outcome and deployment
 prerequisites separately from offline evidence. Live validation requires the
 deployment inputs above.
-
-The rootless smoke variant, `bash deploy/smoke.sh --quadlet`, builds and
-starts the sample units under a disposable user's systemd manager. It requires
-working rootless Podman, an active user manager, and unused example unit and
-volume names. Hosted CI runs it in an isolated Linux runner.
