@@ -32,6 +32,48 @@ public sealed class BrokerHttpTests
     private const string Issuer = "https://identity.example";
     private const string Audience = "https://hosting.example/mcp";
     private const string Scope = "sessions";
+    private const string WorkloadIssuer = "https://workload.example";
+    private const string WorkloadScope = "ci-sessions";
+    private const string WorkloadSubject = "fixture-ci";
+
+    [Fact]
+    public async Task WorkloadCanRecoverOnlyItsAdmissionAndRevocationDeniesReplayAndDispatch()
+    {
+        using var fixture = new BrokerFixture();
+        fixture.SetWorkloadPolicy(DateTimeOffset.UtcNow.AddMinutes(10));
+        fixture.RegisterWorker("primary");
+        using var human = await fixture.StartAsync(WorkloadSubject, workload: true);
+        await using var host = await fixture.StartMcpAsync(workload: true);
+        var endpoint = new Uri(new Uri(host.Urls.Single()), "/mcp");
+        using var http = fixture.ConnectMcpToken(endpoint, fixture.WorkloadToken());
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var ct = timeout.Token;
+        await using var client = await ConnectMcp(endpoint, http, ct);
+        var deniedId = Guid.NewGuid();
+        var denied = new Dictionary<string, object?> { ["mutationId"] = deniedId, ["project"] = "other", ["task"] = "fixture" };
+        Assert.True((await client.CallToolAsync("session_start", denied, cancellationToken: ct)).IsError);
+        Assert.False(fixture.HasAdmission(deniedId));
+
+        var mutation = Guid.NewGuid();
+        var start = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo", ["task"] = "fixture" };
+        var session = ReadMcpStatus(await client.CallToolAsync("session_start", start, cancellationToken: ct));
+        var lookup = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo" };
+        Assert.Equal(session.SessionId, ReadMcpStatus(await client.CallToolAsync("session_lookup", lookup, cancellationToken: ct)).SessionId);
+        using var humanRead = await human.GetAsync($"{Sessions}/{session.SessionId}", ct);
+        Assert.Equal(HttpStatusCode.NotFound, humanRead.StatusCode);
+
+        using var worker = fixture.ConnectWorker("primary");
+        var claim = await Claim(worker, new ClaimJob(Guid.NewGuid()));
+        var dispatch = $"{WorkerJobPath(claim)}/dispatch";
+        fixture.SetWorkloadPolicy(DateTimeOffset.UtcNow.AddMinutes(-1));
+        using var expired = await worker.PostAsync(dispatch, null, ct);
+        Assert.Equal(HttpStatusCode.Forbidden, expired.StatusCode);
+        Assert.True((await client.CallToolAsync("session_start", start, cancellationToken: ct)).IsError);
+        fixture.SetWorkloadPolicy(null);
+        using var revoked = await worker.PostAsync(dispatch, null, ct);
+        Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
+        Assert.True((await client.CallToolAsync("session_lookup", lookup, cancellationToken: ct)).IsError);
+    }
 
     [Fact]
     public async Task ConcurrentStartsAndReconnectHaveOneDurableAdmission()
@@ -525,18 +567,34 @@ public sealed class BrokerHttpTests
         Assert.Equal(HttpStatusCode.Unauthorized, missing.StatusCode);
         Assert.Contains("resource_metadata=\"https://hosting.example/.well-known/oauth-protected-resource/mcp\"",
             missing.Headers.WwwAuthenticate.ToString());
+        var deniedMutation = Guid.NewGuid();
         using var unlisted = fixture.ConnectMcpHttp(endpoint, "unlisted");
         foreach (var message in new[]
         {
             """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}""",
             """{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""",
-            """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_list","arguments":{"project":"demo"}}}"""
+            """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_list","arguments":{"project":"demo"}}}""",
+            JsonSerializer.Serialize(new { jsonrpc = "2.0", id = 4, method = "tools/call", @params = new
+            {
+                name = "session_start", arguments = new { project = "demo", mutationId = deniedMutation, task = "denied" }
+            } })
         })
         {
             using var denied = await unlisted.PostAsync(endpoint,
                 new StringContent(message, System.Text.Encoding.UTF8, "application/json"), ct);
             Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+            using var anonymous = await transport.PostAsync(endpoint,
+                new StringContent(message, System.Text.Encoding.UTF8, "application/json"), ct);
+            Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
         }
+
+        foreach (var method in new[] { HttpMethod.Get, HttpMethod.Delete, HttpMethod.Options, HttpMethod.Head })
+        {
+            using var request = new HttpRequestMessage(method, endpoint);
+            using var denied = await transport.SendAsync(request, ct);
+            Assert.Equal(HttpStatusCode.Unauthorized, denied.StatusCode);
+        }
+        Assert.False(fixture.HasAdmission(deniedMutation));
 
         var mutation = Guid.NewGuid();
         var arguments = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo", ["task"] = "fixture" };
@@ -616,6 +674,17 @@ public sealed class BrokerHttpTests
         public int KeyRequests => Volatile.Read(ref keyRequests);
         public string WorkerDirectory => Path.Combine(directory.FullName, "worker");
 
+        public bool HasAdmission(Guid mutation)
+        {
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+                { DataSource = Path.Combine(directory.FullName, "broker.db"), Pooling = false }.ToString());
+            connection.Open();
+            using var query = connection.CreateCommand();
+            query.CommandText = "SELECT EXISTS (SELECT 1 FROM sessions WHERE mutation_id = $mutation);";
+            query.Parameters.AddWithValue("$mutation", mutation.ToString("D"));
+            return (long)query.ExecuteScalar()! != 0;
+        }
+
         public void CorruptArtifact(Guid jobId)
         {
             using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -627,7 +696,7 @@ public sealed class BrokerHttpTests
             Assert.Equal(1, change.ExecuteNonQuery());
         }
 
-        public async Task<HttpClient> StartAsync(string subject)
+        public async Task<HttpClient> StartAsync(string subject, bool workload = false)
         {
             var certificatePath = Path.Combine(directory.FullName, "server.pfx");
             File.WriteAllBytes(certificatePath, server.Export(X509ContentType.Pfx));
@@ -650,16 +719,21 @@ public sealed class BrokerHttpTests
                 settings[$"Broker:Workers:{lane}:CertificateSha256"] = certificate.GetCertHashString(HashAlgorithmName.SHA256);
             }
 
+            if (workload)
+            {
+                settings["Broker:Authentication:Workload:Issuer"] = WorkloadIssuer;
+                settings["Broker:Authentication:Workload:Scope"] = WorkloadScope;
+            }
             builder.Configuration.AddInMemoryCollection(settings);
             builder.Services.AddSingleton<TimeProvider>(clock);
-            builder.Services.Configure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme,
+            builder.Services.ConfigureAll<JwtBearerOptions>(
                 options => options.BackchannelHttpHandler = new DiscoveryHandler(this));
             app = BrokerApplication.Build(builder);
             await app.StartAsync();
             return Connect(Token(subject));
         }
 
-        public async Task<WebApplication> StartMcpAsync()
+        public async Task<WebApplication> StartMcpAsync(bool workload = false)
         {
             var edgePolicy = Path.Combine(directory.FullName, "edge-policy.json");
             var edgeCertificate = Path.Combine(directory.FullName, "edge.pfx");
@@ -678,7 +752,12 @@ public sealed class BrokerHttpTests
                 ["Kestrel:Endpoints:Fixture:Url"] = "https://127.0.0.1:0",
                 ["Kestrel:Certificates:Default:Path"] = Path.Combine(directory.FullName, "server.pfx")
             });
-            builder.Services.Configure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme,
+            if (workload)
+            {
+                builder.Configuration["Mcp:Authentication:Workload:Issuer"] = WorkloadIssuer;
+                builder.Configuration["Mcp:Authentication:Workload:Scope"] = WorkloadScope;
+            }
+            builder.Services.ConfigureAll<JwtBearerOptions>(
                 options => options.BackchannelHttpHandler = new DiscoveryHandler(this));
             builder.Services.PostConfigure<HttpClientFactoryOptions>(McpApplication.BrokerClientName,
                 options => options.HttpMessageHandlerBuilderActions.Add(handler =>
@@ -691,6 +770,8 @@ public sealed class BrokerHttpTests
 
         public HttpClient ConnectMcpHttp(Uri endpoint, string? subject = null) =>
             Connect(endpoint, subject is null ? null : Token(subject), null);
+
+        public HttpClient ConnectMcpToken(Uri endpoint, string token) => Connect(endpoint, token, null);
 
         public async Task StopAsync()
         {
@@ -743,6 +824,30 @@ public sealed class BrokerHttpTests
                 now.AddMinutes(-10), now.AddMinutes(expired ? -1 : 10), new SigningCredentials(signingKey, algorithm));
             return new JwtSecurityTokenHandler().WriteToken(token);
         }
+
+        public string WorkloadToken()
+        {
+            var now = DateTime.UtcNow;
+            var key = new RsaSecurityKey(signing) { KeyId = "fixture" };
+            var token = new JwtSecurityToken(WorkloadIssuer, Audience,
+                [new("sub", WorkloadSubject), new("scope", WorkloadScope),
+                 new("iat", EpochTime.GetIntDate(now).ToString(System.Globalization.CultureInfo.InvariantCulture), ClaimValueTypes.Integer64)],
+                now.AddSeconds(-1), now.AddMinutes(2), new SigningCredentials(key, SecurityAlgorithms.RsaSha256));
+            token.Header["typ"] = "at+jwt";
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+
+        public void SetWorkloadPolicy(DateTimeOffset? expiresUtc) => SetRawPolicy(JsonSerializer.Serialize(new
+        {
+            version = 1,
+            projects = new[] { new { id = "demo", lanes = new[] { "primary" } }, new { id = "other", lanes = new[] { "primary" } } },
+            people = new[] { new { id = WorkloadSubject, identities = new[] { new { issuer = Issuer, subject = WorkloadSubject } }, grants = Array.Empty<object>() } },
+            workload = expiresUtc is null ? null : new
+            {
+                id = WorkloadSubject, identity = new { issuer = WorkloadIssuer, subject = WorkloadSubject },
+                expiresUtc, project = "demo", grants = new[] { new { project = "demo", lane = "primary", actions = new[] { "start", "read" } } }
+            }
+        }));
 
         private string PolicyPath => Path.Combine(directory.FullName, "policy.json");
 
@@ -818,13 +923,21 @@ public sealed class BrokerHttpTests
         {
             protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             {
+                if (request.RequestUri?.AbsoluteUri == WorkloadIssuer + "/.well-known/openid-configuration")
+                {
+                    return Reply(new { issuer = WorkloadIssuer, jwks_uri = WorkloadIssuer + "/jwks" });
+                }
+
                 if (request.RequestUri?.AbsoluteUri == Issuer + "/.well-known/openid-configuration")
                 {
                     return Reply(new { issuer = fixture.MetadataIssuer, jwks_uri = Issuer + "/jwks" });
                 }
 
-                Assert.Equal(Issuer + "/jwks", request.RequestUri?.AbsoluteUri);
-                Interlocked.Increment(ref fixture.keyRequests);
+                if (request.RequestUri?.AbsoluteUri != WorkloadIssuer + "/jwks")
+                {
+                    Assert.Equal(Issuer + "/jwks", request.RequestUri?.AbsoluteUri);
+                    Interlocked.Increment(ref fixture.keyRequests);
+                }
                 var key = fixture.signing.ExportParameters(false);
                 return Reply(new
                 {

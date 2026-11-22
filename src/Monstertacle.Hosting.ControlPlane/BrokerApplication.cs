@@ -12,7 +12,7 @@ public static class BrokerApplication
     {
         var authentication = new BrokerAuthentication(builder.Configuration);
         authentication.Configure(builder);
-        builder.Services.AddSingleton(new BrokerPolicy(builder.Configuration.GetSection("Broker")));
+        builder.Services.AddSingleton(new BrokerPolicy(builder.Configuration.GetSection("Broker"), authentication.WorkloadIssuer));
         builder.Services.AddSingleton<SessionStore>();
 
         var app = builder.Build();

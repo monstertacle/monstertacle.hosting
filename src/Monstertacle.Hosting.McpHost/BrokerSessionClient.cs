@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
 using ModelContextProtocol;
 
 namespace Monstertacle.Hosting.McpHost;
@@ -11,7 +10,7 @@ internal sealed class BrokerSessionClient(IHttpClientFactory clients, IHttpConte
     public async Task<T> Send<T>(HttpMethod method, string path, object? body, CancellationToken cancellationToken)
     {
         var context = requests.HttpContext ?? throw new InvalidOperationException("An MCP HTTP request is required.");
-        var token = await context.GetTokenAsync(JwtBearerDefaults.AuthenticationScheme, "access_token");
+        var token = await context.GetTokenAsync("access_token");
         if (string.IsNullOrEmpty(token))
         {
             throw new McpException("Session access denied.");
