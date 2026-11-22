@@ -48,5 +48,11 @@ jobs:
           systemd-analyze verify deploy/public-ingress/hosting-public-edge.{socket,service}
       - name: Run rootless Quadlet smoke
         run: |
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
           bash deploy/smoke.sh --quadlet
+
+  deployment-bundle:
+    uses: ./.github/workflows/deployment-bundle.yml
+    with:
+      tag: deploy-v0.0.0

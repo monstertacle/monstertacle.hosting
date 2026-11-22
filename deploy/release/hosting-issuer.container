@@ -1,0 +1,10 @@
+[Container]
+Image=localhost/monstertacle-hosting-fixture-issuer:RELEASE_TAG
+Pull=never
+Network=hosting-private.network
+NetworkAlias=issuer
+Volume=%h/.config/monstertacle-hosting/issuer:/run/discovery:ro,Z
+ReadOnly=true
+Tmpfs=/tmp
+DropCapability=all
+NoNewPrivileges=true

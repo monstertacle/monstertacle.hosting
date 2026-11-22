@@ -110,17 +110,6 @@ if [[ ! "$HOSTING_EDGE_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || (( HOSTING_EDGE_PORT > 6
     fail "HOSTING_EDGE_PORT must be a TCP port number."
 fi
 mkdir -p "$HOSTING_CONFIG_DIR"/{broker,worker,edge}
-certificate() {
-    local name=$1 dns=$2 purpose=$3
-    openssl req -x509 -newkey rsa:2048 -noenc -days 1 -subj "/CN=$dns" \
-        -addext "subjectAltName=DNS:$dns" -addext "extendedKeyUsage=$purpose" \
-        -keyout "$scratch/$name.key" -out "$scratch/$name.pem" 2>/dev/null
-    openssl pkcs12 -export -out "$scratch/$name.pfx" -inkey "$scratch/$name.key" \
-        -in "$scratch/$name.pem" -passout pass:
-}
-fingerprint() {
-    openssl x509 -in "$scratch/$1.pem" -outform DER | openssl dgst -sha256 -r | cut -d ' ' -f 1
-}
 certificate broker broker serverAuth
 certificate worker-client worker clientAuth
 certificate edge-server localhost serverAuth

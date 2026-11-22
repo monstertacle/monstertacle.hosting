@@ -1,0 +1,70 @@
+name: Deployment release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Deployment release tag (deploy-vX.Y.Z)
+        type: string
+        required: true
+
+run-name: Deployment release ${{ inputs.tag }}
+
+permissions: {}
+
+concurrency:
+  group: deployment-release
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Require canonical green main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Verify the release request
+        run: |
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch &&
+             "$GITHUB_REPOSITORY" == monstertacle/monstertacle.hosting &&
+             "$GITHUB_REF" == refs/heads/main ]]
+          [[ "$RELEASE_TAG" =~ ^deploy-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "${#RELEASE_TAG}" -le 64 ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$GITHUB_SHA" ]]
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --commit "$GITHUB_SHA" \
+            --event push --json conclusion,headSha |
+            jq -e --arg sha "$GITHUB_SHA" 'any(.[]; .headSha == $sha and .conclusion == "success")'
+
+  verify:
+    needs: guard
+    permissions:
+      contents: read
+    uses: ./.github/workflows/deployment-bundle.yml
+    with:
+      tag: ${{ inputs.tag }}
+
+  publish:
+    name: Publish verified deployment assets
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.verify.outputs.artifact }}
+          path: ${{ runner.temp }}/deployment-assets
+      - name: Publish the verified archive and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: bash deploy/release/publish-assets.sh "$RELEASE_TAG" "$RUNNER_TEMP/deployment-assets"

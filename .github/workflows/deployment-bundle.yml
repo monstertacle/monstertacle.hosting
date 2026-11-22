@@ -1,0 +1,71 @@
+name: Verify deployment bundle
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+    outputs:
+      artifact:
+        value: ${{ jobs.package.outputs.artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package Linux amd64 assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      artifact: ${{ steps.archive.outputs.name }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Build deployment assets
+        id: archive
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          bash deploy/release/build-assets.sh docker "$RELEASE_TAG" "$RUNNER_TEMP/deployment-assets"
+          printf 'name=deployment-assets-%s\n' "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.archive.outputs.name }}
+          path: ${{ runner.temp }}/deployment-assets/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 5
+
+  qualify:
+    name: Run source-free fixture (${{ matrix.mode }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: compose
+            os: ubuntu-latest
+          - mode: quadlet
+            os: ubuntu-26.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ${{ needs.package.outputs.artifact }}
+          path: ${{ runner.temp }}/deployment-assets
+      - name: Verify and load the archive, then run from a temporary extraction
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          MODE: ${{ matrix.mode }}
+        run: |
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          bash deploy/release/verify-assets.sh "$MODE" "$RELEASE_TAG" "$RUNNER_TEMP/deployment-assets" "$GITHUB_SHA"

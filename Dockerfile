@@ -30,6 +30,14 @@ FROM runtime AS worker-host
 COPY --from=build-worker /publish .
 ENTRYPOINT ["dotnet", "Monstertacle.Hosting.WorkerHost.dll"]
 
+FROM source AS build-fixture-issuer
+COPY tests/fixtures/ReleaseIssuer/ tests/fixtures/ReleaseIssuer/
+RUN dotnet publish tests/fixtures/ReleaseIssuer -c Release -o /publish -p:UseAppHost=false
+
+FROM runtime AS fixture-issuer
+COPY --from=build-fixture-issuer /publish .
+ENTRYPOINT ["dotnet", "ReleaseIssuer.dll"]
+
 FROM runtime AS mcp-host
 COPY --from=build-edge /publish .
 ENTRYPOINT ["dotnet", "Monstertacle.Hosting.McpHost.dll"]
