@@ -105,4 +105,6 @@ and `bash quickstart.sh quadlet enrollment`.
 
 For a standalone issuer with Docker Compose, see the
 [optional Keycloak reference](keycloak/README.md).
-Run `bash quickstart.sh compose keycloak` for the disposable real-issuer fixture.
+It includes a static OAuth client manifest example for a shared MCP endpoint.
+Run `bash quickstart.sh compose keycloak` to check repeatable rendering and
+exercise the public and confidential registrations with a disposable issuer.

@@ -40,8 +40,63 @@ keycloak_startup_diagnostics() {
     fi
 }
 
+check_keycloak_renderer() {
+    local example="$bundle/keycloak/clients.example.json"
+    local renderer="$bundle/keycloak/render-realm.sh"
+    local check="$scratch/render-check"
+    local filter
+    mkdir -m 0700 "$check"
+    bash "$renderer" --manifest "$example" > "$check/realm.json"
+    bash "$renderer" --manifest "$example" > "$check/repeat.json"
+    cmp "$check/realm.json" "$check/repeat.json"
+    bash "$renderer" --clients "$example" > "$check/clients.json"
+    jq -e --slurpfile clients "$check/clients.json" '
+        .clients == $clients[0] and (.clients | length == 3)
+        and (.clients | map(.publicClient) == [true,false,true])
+        and all(.clients[]; .attributes["pkce.code.challenge.method"] == "S256"
+            and .standardFlowEnabled and (.implicitFlowEnabled | not)
+            and (.directAccessGrantsEnabled | not) and (.serviceAccountsEnabled | not)
+            and (.fullScopeAllowed | not) and .defaultClientScopes == []
+            and .optionalClientScopes == ["sessions"] and (has("secret") | not)
+            and any(.protocolMappers[]; .protocolMapper == "oidc-sub-mapper"))
+        and .clientScopes[0].protocolMappers[0].config["included.custom.audience"] == "https://mcp.example.net/mcp"
+    ' "$check/realm.json" >/dev/null
+    bash "$renderer" https://mcp.example.net/mcp example-hosting > "$check/legacy.json"
+    jq -e --slurpfile realm "$check/realm.json" '
+        .clients[0].redirectUris == ["http://127.0.0.1:19876/mcp/oauth/callback"]
+        and .clients == $realm[0].clients[:1] and .clientScopes == $realm[0].clientScopes
+    ' "$check/legacy.json" >/dev/null
+    for filter in '.clients += [.clients[0]]' '.clients = []' '.clients[0].id = "../desktop"' \
+        '.clients[0].redirectUris = ["http://127.0.0.1:65536/callback"]' \
+        '.clients[0].redirectUris = ["http://localhost:19876/callback"]' \
+        '.clients[1].redirectUris = ["https://chat.example.net/*"]' \
+        '.clients[1].redirectUris = ["https://chat.example.net/%2A"]' \
+        '.clients[1].redirectUris = ["https://chat.example.net/%5Ccallback"]' \
+        '.clients[1].redirectUris = ["https://user@chat.example.net/callback"]' \
+        '.clients[1].redirectUris = ["https://chat.example.net/callback#fragment"]' \
+        '.clients[1].redirectUris = ["https://chat.example.net:99999/callback"]' \
+        '.clients[1].redirectUris = ["http://chat.example.net/callback"]' \
+        '.clients[1].redirectUris = ["https://chat.example.net/%QQ"]' \
+        '.clients[1].redirectUris = ["https://chat.example.net/callback\n"]' \
+        '.clients[1].redirectUris = "https://chat.example.net/callback"' \
+        '.clients[1].redirectUris += [.clients[1].redirectUris[0]]' \
+        '.clients[1].secret = null' '.clients[1].type = "unknown"' \
+        '.resource = "https://mcp.example.net/mcp?extra=1"' '., .'; do
+        jq "$filter" "$example" > "$check/invalid.json"
+        if bash "$renderer" --manifest "$check/invalid.json" > "$check/rejected.json" 2>/dev/null; then
+            return 1
+        fi
+        [[ ! -s "$check/rejected.json" ]] || return 1
+    done
+    printf '%s\n' '{' > "$check/invalid.json"
+    if bash "$renderer" --manifest "$check/invalid.json" > "$check/rejected.json" 2>/dev/null; then
+        return 1
+    fi
+    [[ ! -s "$check/rejected.json" ]]
+}
+
 start_keycloak_fixture() {
-    local attempt status path user
+    local attempt status path user chat_callback chat_id
     export KEYCLOAK_CONFIG_DIR="$scratch/keycloak"
     export KEYCLOAK_PUBLIC_ORIGIN=https://identity.example.test:9443
     export KEYCLOAK_ADMIN_ORIGIN=https://localhost:9444
@@ -53,8 +108,12 @@ start_keycloak_fixture() {
         -addext 'subjectAltName=DNS:identity.example.test,DNS:localhost' \
         -keyout "$KEYCLOAK_CONFIG_DIR/tls.key" -out "$KEYCLOAK_CA_FILE" >/dev/null 2>&1
 
-    callback=http://127.0.0.1:19876/mcp/oauth/callback
-    bash "$bundle/keycloak/render-realm.sh" "$resource" example-hosting "$callback" |
+    phase="Keycloak deterministic manifest rendering"
+    check_keycloak_renderer
+    jq --arg resource "$resource" '.resource = $resource' "$bundle/keycloak/clients.example.json" > "$scratch/clients.json"
+    callback=$(jq -er '.clients[0].redirectUris[0]' "$scratch/clients.json")
+    chat_callback=$(jq -er '.clients[1].redirectUris[0]' "$scratch/clients.json")
+    bash "$bundle/keycloak/render-realm.sh" --manifest "$scratch/clients.json" |
         jq '.clients += [(.clients[0] | .clientId = "wrong-audience" | .protocolMappers += [
             {name:"Extra audience",protocol:"openid-connect",protocolMapper:"oidc-audience-mapper",
                 config:{"included.custom.audience":"https://other.example.test/mcp","access.token.claim":"true"}}
@@ -151,22 +210,45 @@ EOF_NETWORK
     keycloak_code person-one example-hosting granted
     keycloak_code person-two example-hosting unlisted
     keycloak_code person-one wrong-audience wrong-audience
+
+    phase="Keycloak confidential client secret retrieval"
+    printf 'Authorization: Bearer %s\n' "$(< "$scratch/admin-token")" > "$scratch/keycloak-admin.header"
+    local admin_clients="$KEYCLOAK_ADMIN_ORIGIN/admin/realms/hosting/clients"
+    keycloak_request --fail -H "@$scratch/keycloak-admin.header" \
+        "$admin_clients?clientId=example-chat-one" -o "$scratch/chat-registration.json"
+    chat_id=$(jq -er 'select(length == 1) | .[0] | select(.clientId == "example-chat-one"
+        and .publicClient == false and .clientAuthenticatorType == "client-secret") | .id' \
+        "$scratch/chat-registration.json")
+    [[ "$chat_id" =~ ^[A-Za-z0-9-]+$ ]]
+    keycloak_request --fail -H "@$scratch/keycloak-admin.header" \
+        "$admin_clients/$chat_id/client-secret" -o "$scratch/chat-credential.json"
+    jq -jer '.value | strings | select(length > 0)' "$scratch/chat-credential.json" > "$scratch/chat-secret"
+    keycloak_code person-one example-chat-one wrong-redirect "$chat_callback-extra"
+    keycloak_code person-one example-chat-one missing-secret "$chat_callback"
+    keycloak_code person-one example-chat-one missing "$chat_callback" "$scratch/chat-secret"
+    keycloak_code person-one example-chat-one confidential "$chat_callback" "$scratch/chat-secret"
+    keycloak_code person-one example-chat-two chat-public "$(jq -er '.clients[2].redirectUris[0]' "$scratch/clients.json")"
     compose+=(-f "$scratch/hosting-keycloak-network.yaml")
 }
 
 keycloak_code() {
-    local user=$1 client=$2 test_case=$3 directory status login_url query redirect encoded remainder
+    local user=$1 client=$2 test_case=$3 redirect_uri=${4:-$callback} client_secret=${5:-}
+    local directory status login_url query redirect encoded remainder
     local protocol="$issuer/protocol/openid-connect"
     directory=$(mktemp -d "$scratch/oauth.XXXXXXXX")
     openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' > "$directory/verifier"
     openssl dgst -sha256 -binary "$directory/verifier" |
         openssl base64 -A | tr '+/' '-_' | tr -d '=' > "$directory/challenge"
     phase="Keycloak authorization request ($test_case)"
-    status=$(keycloak_request -o "$directory/login.html" -w '%{http_code}' -c "$directory/cookies" -G \
-        --data-urlencode "client_id=$client" --data-urlencode "redirect_uri=$callback" \
+    status=$(keycloak_request -o "$directory/login.html" -D "$directory/auth-headers" -w '%{http_code}' -c "$directory/cookies" -G \
+        --data-urlencode "client_id=$client" --data-urlencode "redirect_uri=$redirect_uri" \
         --data 'response_type=code' --data-urlencode 'scope=openid sessions' \
         --data-urlencode "code_challenge@$directory/challenge" --data 'code_challenge_method=S256' \
         "$protocol/auth")
+    if [[ "$test_case" == wrong-redirect ]]; then
+        [[ "$status" == 400 ]] && ! grep -qi '^location:' "$directory/auth-headers"
+        return
+    fi
     [[ "$status" == 200 ]]
     login_url=$(sed -nE 's/.*id="kc-form-login"[^>]*action="([^"]+)".*/\1/p' "$directory/login.html" | sed 's/\&amp;/\&/g')
     query=${login_url#"$issuer/login-actions/authenticate?"}
@@ -178,10 +260,13 @@ keycloak_code() {
         --data-urlencode "password@$scratch/$user.password" --config "$directory/login.curl")
     [[ "$status" == 302 || "$status" == 303 ]]
     redirect=$(awk 'tolower($1) == "location:" {sub(/^[^:]+:[[:blank:]]*/, ""); sub(/\r$/, ""); print}' "$directory/headers")
-    [[ "$redirect" == "$callback?"* && "$redirect" =~ [\?\&]code=([A-Za-z0-9._-]+)($|\&) ]]
+    [[ "$redirect" == "$redirect_uri?"* && "$redirect" =~ [\?\&]code=([A-Za-z0-9._-]+)($|\&) ]]
     printf '%s' "${BASH_REMATCH[1]}" > "$directory/code"
 
-    local -a verifier=()
+    local -a verifier=() authentication=()
+    if [[ -n "$client_secret" ]]; then
+        authentication=(--data-urlencode "client_secret@$client_secret")
+    fi
     case "$test_case" in
         missing) ;;
         wrong)
@@ -192,8 +277,13 @@ keycloak_code() {
     esac
     phase="Keycloak authorization code redemption ($test_case)"
     status=$(keycloak_request -o "$directory/token.json" -w '%{http_code}' --data 'grant_type=authorization_code' \
-        --data-urlencode "client_id=$client" --data-urlencode "redirect_uri=$callback" \
-        --data-urlencode "code@$directory/code" "${verifier[@]}" "$protocol/token")
+        --data-urlencode "client_id=$client" --data-urlencode "redirect_uri=$redirect_uri" \
+        --data-urlencode "code@$directory/code" "${verifier[@]}" "${authentication[@]}" "$protocol/token")
+    if [[ "$test_case" == missing-secret ]]; then
+        [[ "$status" == 400 || "$status" == 401 ]]
+        jq -e '.access_token == null and .error == "invalid_client"' "$directory/token.json" >/dev/null
+        return
+    fi
     if [[ "$test_case" == missing || "$test_case" == wrong ]]; then
         [[ "$status" == 400 ]]
         jq -e '.access_token == null and (.error == "invalid_grant" or .error == "invalid_request")' "$directory/token.json" >/dev/null

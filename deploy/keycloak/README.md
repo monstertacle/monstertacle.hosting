@@ -63,8 +63,8 @@ docker compose --project-name hosting-id --env-file /dev/null \
   -f keycloak/compose.yaml -f keycloak/bootstrap.compose.yaml up -d
 ```
 
-Keycloak imports the realm only on initial creation. Apply further changes
-as private administrative operations. Back up PostgreSQL and manage TLS
+Keycloak imports the realm only on initial creation. Use the existing realm
+procedure below to add clients later. Back up PostgreSQL and manage TLS
 renewals independently. If ports change, update both the matching origin
 and `KEYCLOAK_LOGIN_PORT` or `KEYCLOAK_ADMIN_PORT`.
 
@@ -110,8 +110,8 @@ Use a short-lived client-credentials token from the private
 users. Send the provisioning client's secret using curl's
 `--data-urlencode "client_secret@/path/to/private/file"` form, with redirects
 disabled. Store the token response and extract its raw `access_token` into a
-mode-`0600` file. The public MCP client has authorization code with S256 PKCE,
-no client secret, and a single registered callback.
+mode-`0600` file. The generated MCP clients use authorization code with
+S256 PKCE. Each client has its own registration and exact callback list.
 
 ## Create an account and grant access
 
@@ -146,6 +146,63 @@ broker and edge need network access to the HTTPS discovery and JWKS
 endpoints. The public listener serves both OIDC and RFC 8414 metadata for the
 `hosting` realm. See the [operator enrollment](../enrollment/README.md) and
 [Keycloak hostname](https://www.keycloak.org/server/hostname) guides.
+
+## Register multiple static clients
+
+Copy `keycloak/clients.example.json` to the private directory. Replace
+`resource` with the same complete HTTPS `/mcp` URL configured in both
+Hosting authentication sections. For each entry give a unique `id`, a
+`type`, and a nonempty `redirectUris` list, with each URI written exactly as
+the client sends it. The example uses illustrative client IDs and callbacks.
+
+- `desktop` uses public OAuth with explicit `http://127.0.0.1:PORT/path`
+  callbacks.
+- `chat-public` uses public OAuth with HTTPS callbacks.
+- `chat-confidential` uses HTTPS callbacks and authenticates the client at
+  the token endpoint. Keycloak issues its credential after registration.
+
+Use letters, digits, dots, underscores or hyphens in IDs (1 to 64 characters,
+beginning with a letter or digit). Each callback needs an explicit absolute
+URI, with no userinfo, fragments, or wildcards. The manifest has no credential
+fields. Keep the configured manifest and all generated payloads private.
+
+For a new realm, render `realm.json` before running the initial import.
+
+```sh
+umask 077
+private="$KEYCLOAK_CONFIG_DIR"
+bash keycloak/render-realm.sh --manifest "$private/clients.json" > "$private/realm.json"
+```
+
+### Add clients to an existing realm
+
+Use the private Keycloak Admin Console with a realm administrator authorized
+to manage clients. In the `hosting` realm, verify that the optional
+`sessions` client scope has the Hosting resource audience mapper configured
+with the exact same MCP URL. For a compatible realm that lacks this scope,
+use `--manifest` to inspect the `sessions` entry under `clientScopes` and
+create that scope and mapper privately before proceeding. If the existing
+scope differs, review the effect on other clients before changing it.
+
+```sh
+umask 077
+private="$KEYCLOAK_CONFIG_DIR"
+bash keycloak/render-realm.sh --clients "$private/clients.json" > "$private/static-clients.json"
+jq -e '.[] | select(.clientId == "example-chat-one")' "$private/static-clients.json" \
+  > "$private/new-client.json"
+```
+
+Substitute the private client ID in the selector and repeat per registration.
+For an unused ID, use **Clients → Import client** with the corresponding
+JSON object. For an existing ID, review the changes against the current
+registration and apply them in the console while preserving credentials and
+unrelated settings. Verify the callback list, standard flow with S256 only,
+subject mapper, and scope assignments. Under **Client scopes**, ensure there
+are no inherited default scopes on the MCP client and that `sessions` is
+assigned as optional. Retrieve any confidential client credential privately
+from **Credentials** and enter it in the consumer's OAuth configuration.
+The user still needs a Hosting enrollment and grants. See the
+[Keycloak server administration guide](https://www.keycloak.org/docs/latest/server_admin/).
 
 ## OpenCode static registration
 
@@ -195,3 +252,26 @@ If OpenCode attempts dynamic registration and receives 404, check that it is
 reading the static client ID at the location for your version. If the redirect
 is rejected, compare the callback scheme, host, port and path to the realm's
 registration. See the [OpenCode MCP documentation](https://opencode.ai/docs/mcp-servers).
+
+## ChatGPT static registration
+
+In ChatGPT Plugins, add a custom MCP server using the complete HTTPS MCP URL
+and OAuth with your static client credentials. Copy the exact redirect URI
+from that specific plugin's management page into the private manifest.
+Use the URI displayed for that plugin and callback mode. Once registered,
+complete installation and OAuth sign-in in the intended account or workspace
+and check that an authorized tool works. See [OpenAI Plugin authentication](https://developers.openai.com/plugins/build/auth)
+and [Add custom MCP server](https://developers.openai.com/api/docs/guides/custom-mcp-server).
+
+## Claude static registration
+
+Add a custom web connector with the complete HTTPS MCP URL. Under OAuth
+client, select **Use your own OAuth client**. Enter its registered client ID
+and a secret if Keycloak issued one. Claude documents
+`https://claude.ai/api/mcp/auth_callback` as the redirect URI for this flow.
+Connect in the intended account or workspace and check that an authorized
+tool works. See the [Claude custom connector guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
+
+The release fixture verifies local OAuth exchanges against disposable Keycloak
+users. ChatGPT and Claude acceptance requires the corresponding accounts,
+registrations and sign-in tests.

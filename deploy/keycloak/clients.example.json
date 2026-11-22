@@ -1,0 +1,20 @@
+{
+  "resource": "https://mcp.example.net/mcp",
+  "clients": [
+    {
+      "id": "example-hosting",
+      "type": "desktop",
+      "redirectUris": ["http://127.0.0.1:19876/mcp/oauth/callback"]
+    },
+    {
+      "id": "example-chat-one",
+      "type": "chat-confidential",
+      "redirectUris": ["https://chat.example.net/plugin/oauth/callback", "https://chat.example.net/other/oauth/callback"]
+    },
+    {
+      "id": "example-chat-two",
+      "type": "chat-public",
+      "redirectUris": ["https://connector.example.net/oauth/callback"]
+    }
+  ]
+}
