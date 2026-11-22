@@ -7,11 +7,12 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 case "${1:-}" in
     compose) engine=docker ;;
     quadlet) engine=podman ;;
-    *) fail "Usage: bash quickstart.sh compose|quadlet [enrollment]" ;;
+    *) fail "Usage: bash quickstart.sh compose|quadlet [enrollment|keycloak]" ;;
 esac
 enrollment=${2:-}
-[[ $# -le 2 && ( -z "$enrollment" || "$enrollment" == enrollment ) &&
-    "$(uname -sm)" == 'Linux x86_64' ]] || fail "Select one engine on Linux x86-64, optionally with enrollment."
+[[ $# -le 2 && ( -z "$enrollment" || "$enrollment" == enrollment ||
+    ( "$engine" == docker && "$enrollment" == keycloak ) ) &&
+    "$(uname -sm)" == 'Linux x86_64' ]] || fail "Select one supported fixture mode on Linux x86-64."
 # Fixture credentials always live outside the extracted tree.
 bundle=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 scratch=$(mktemp -d /tmp/hosting-release.XXXXXXXX)
@@ -22,6 +23,7 @@ export HOSTING_EDGE_PORT=${HOSTING_EDGE_PORT:-38443}
 roles=(issuer broker worker worker-secondary edge)
 state_roles=(broker worker worker-secondary)
 started=false
+keycloak_started=false
 units=""
 # shellcheck source=deploy/smoke-config.sh
 source "$bundle/smoke-config.sh"
@@ -29,9 +31,12 @@ source "$bundle/smoke-config.sh"
 source "$bundle/fixture-config.sh"
 # shellcheck source=deploy/release/fixture-enrollment.sh
 source "$bundle/fixture-enrollment.sh"
+# shellcheck source=deploy/release/fixture-keycloak.sh
+source "$bundle/fixture-keycloak.sh"
 
 compose=(docker compose --project-name "$project" --env-file /dev/null
-    -f "$bundle/compose.yaml" -f "$bundle/fixture/compose.yaml")
+    -f "$bundle/compose.yaml")
+if [[ "$enrollment" != keycloak ]]; then compose+=(-f "$bundle/fixture/compose.yaml"); fi
 if [[ -n "$enrollment" ]]; then compose+=(-f "$bundle/enrollment/compose.yaml"); fi
 
 cleanup() {
@@ -58,6 +63,9 @@ cleanup() {
                 fi
             done
         fi
+    fi
+    if [[ "$keycloak_started" == true ]]; then
+        "${keycloak_compose[@]}" down --volumes >/dev/null 2>&1 || status=1
     fi
     if [[ -n "$units" ]]; then
         rm -rf -- "$units" || status=1
@@ -98,10 +106,20 @@ mkdir "$HOSTING_CONFIG_DIR"
 issuer=https://issuer:8443
 resource="https://localhost:$HOSTING_EDGE_PORT/mcp"
 subject="granted-$project"
+additional_subject=unlisted
 exec 3>&2
 phase="private bootstrap"
 trap 'printf "Fixture step failed: %s.\n" "$phase" >&3' ERR
+if [[ "$enrollment" == keycloak ]]; then
+    phase="Keycloak reference startup"
+    start_keycloak_fixture > "$scratch/keycloak.log" 2>&1
+fi
 make_fixture > "$scratch/bootstrap.log" 2>&1
+if [[ "$enrollment" == keycloak ]]; then
+    for header in granted unlisted wrong-audience; do
+        cp -- "$scratch/keycloak-$header.header" "$scratch/$header.header"
+    done
+fi
 if [[ -n "$enrollment" ]]; then
     phase="first operator enrollment"
     prepare_enrollment > "$scratch/enrollment.log" 2>&1

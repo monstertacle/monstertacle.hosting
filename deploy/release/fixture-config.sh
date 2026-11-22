@@ -33,6 +33,7 @@ make_fixture() {
     install -m 0444 "$scratch/edge-client.pfx" "$HOSTING_CONFIG_DIR/edge/client.pfx"
     install -m 0444 "$scratch/issuer.pfx" "$HOSTING_CONFIG_DIR/issuer/server.pfx"
     cat /etc/ssl/certs/ca-certificates.crt "$scratch/broker.pem" "$scratch/issuer.pem" > "$scratch/ca.pem"
+    if [[ "$enrollment" == keycloak ]]; then cat "$KEYCLOAK_CA_FILE" >> "$scratch/ca.pem"; fi
 
     jq -cn --arg issuer "$issuer" --arg subject "$subject" '
         {version:1,projects:[{id:"fixture",lanes:["primary","secondary"]}],people:[

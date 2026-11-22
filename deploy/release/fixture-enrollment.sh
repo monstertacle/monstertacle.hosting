@@ -38,7 +38,7 @@ verify_enrollment() {
     if enroll conflict; then return 1; fi
     [[ "$(stat -c '%i' -- "$policy")" == "$initial" ]] || return 1
 
-    jq '.id = "second" | .subject = "unlisted" | .grants |= map(.actions = ["start","read"])' \
+    jq --arg subject "$additional_subject" '.id = "second" | .subject = $subject | .grants |= map(.actions = ["start","read"])' \
         "$scratch/first.json" > "$scratch/second.json"
     jq '.id = "third" | .subject = "fixture-third"' "$scratch/first.json" > "$scratch/third.json"
     enroll second & one=$!

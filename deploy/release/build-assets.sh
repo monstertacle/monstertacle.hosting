@@ -41,7 +41,7 @@ sed -e 's@/worker\([./:]\)@/worker-secondary\1@g' \
     "$bundle/quadlet/hosting-worker.container" > "$bundle/quadlet/hosting-worker-secondary.container"
 cp "$bundle/quadlet/"hosting-worker{,-secondary}-state.volume
 
-cp "$repo/deploy/release/"{README.md,quickstart.sh,fixture-config.sh,fixture-enrollment.sh} "$bundle/"
+cp "$repo/deploy/release/"{README.md,quickstart.sh,fixture-config.sh,fixture-enrollment.sh,fixture-keycloak.sh} "$bundle/"
 cp -R "$repo/deploy/enrollment" "$repo/deploy/keycloak" "$bundle/"
 cp "$repo/deploy/smoke-config.sh" "$bundle/"
 cp "$repo/"{LICENSE,THIRD-PARTY-NOTICES.md} "$bundle/"

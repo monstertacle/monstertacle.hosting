@@ -32,3 +32,4 @@ fi
 "$engine" load --input "$assets/$images"
 bash ./quickstart.sh "$mode"
 bash ./quickstart.sh "$mode" enrollment
+if [[ "$mode" == compose ]]; then bash ./quickstart.sh compose keycloak; fi
