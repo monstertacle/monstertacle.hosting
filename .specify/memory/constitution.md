@@ -34,14 +34,18 @@ authorized environment.
 Keep real API keys, tokens, passwords, credential-bearing connection strings,
 private keys, confidential data, and session or authentication state out of
 sources, tests, docs, examples, Git history, logs, artifacts, caches and images.
+Keep actual deployment hostnames, network addresses, and account identifiers
+out of Git and public artifacts. Use generic placeholders or synthetic fixture
+identifiers in public materials.
 Use runtime secret management and generate ephemeral synthetic test keys at test
 time. Ignore rules alone are insufficient. Report confirmed exposure privately
 to the authorized owner without values and rotate affected real credentials
 promptly with authorization.
 
-Before every commit, examine the exact staged diff and run the [staged secret
-check](../../docs/secret-handling.md). A detection, missing dependency or scan
-failure blocks the commit. Reports must redact sensitive values.
+Before every commit, examine the exact staged diff for secrets and actual
+deployment details, and run the [staged secret check](../../docs/secret-handling.md).
+A detection, missing dependency or scan failure blocks the commit. Reports must
+redact sensitive values.
 
 ## Governance
 
