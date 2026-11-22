@@ -29,7 +29,25 @@ Run credential-free deterministic tests in public CI. Record native and live
 client qualification separately and apply deployment credentials only in an
 authorized environment.
 
+## V. Secret handling
+
+Keep real API keys, tokens, passwords, credential-bearing connection strings,
+private keys, confidential data, and session or authentication state out of
+sources, tests, docs, examples, Git history, logs, artifacts, caches and images.
+Use runtime secret management and generate ephemeral synthetic test keys at test
+time. Ignore rules alone are insufficient. Report confirmed exposure privately
+to the authorized owner without values and rotate affected real credentials
+promptly with authorization.
+
+Before every commit, examine the exact staged diff and run the [staged secret
+check](../../docs/secret-handling.md). A detection, missing dependency or scan
+failure blocks the commit. Reports must redact sensitive values.
+
 ## Governance
 
 Review each feature against these principles before implementation. Record an
 approved amendment in Git with its rationale and applicability.
+
+The 2026-11-22 amendment applies to all contributions to this public repository.
+It adds pre-commit verification to reduce accidental disclosure and leaves
+runtime contracts unchanged. See [the rollout plan](../../specs/011-staged-secret-protection/plan.md).
