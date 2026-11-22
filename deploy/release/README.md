@@ -102,3 +102,6 @@ Use the [operator enrollment guide](enrollment/README.md) to configure one
 shared policy directory and manage human access through the release image.
 The disposable release fixture also supports `bash quickstart.sh compose enrollment`
 and `bash quickstart.sh quadlet enrollment`.
+
+For a standalone issuer with Docker Compose, see the
+[optional Keycloak reference](keycloak/README.md).

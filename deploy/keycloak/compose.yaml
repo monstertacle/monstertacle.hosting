@@ -1,0 +1,75 @@
+services:
+  database:
+    image: docker.io/library/postgres:17.12-bookworm@sha256:837bed18782820fe967067cb5328b02b0d9992c1be9a37ee0c9c492cfc03af3b
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD_FILE: /run/secrets/database_password
+    secrets: [database_password]
+    volumes:
+      - database:/var/lib/postgresql/data
+    networks: [database]
+    healthcheck:
+      test: [CMD, pg_isready, -U, keycloak, -d, keycloak]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
+    entrypoint: [/bin/bash, /opt/keycloak/conf/start-reference.sh]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://database/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_HOSTNAME: "${KEYCLOAK_PUBLIC_ORIGIN:?Set the HTTPS login origin}"
+      KC_HOSTNAME_ADMIN: "${KEYCLOAK_ADMIN_ORIGIN:?Set the HTTPS private admin origin}"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_LOG_LEVEL: warn
+      JAVA_OPTS_KC_HEAP: "-Xms128m -Xmx512m"
+    secrets: [database_password]
+    volumes:
+      - ./start-reference.sh:/opt/keycloak/conf/start-reference.sh:ro
+      - type: bind
+        source: "${KEYCLOAK_CONFIG_DIR:?Set the private Keycloak config directory}/realm.json"
+        target: /opt/keycloak/data/import/hosting-realm.json
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [connector, database]
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+  proxy:
+    image: docker.io/library/nginx:1.30.7-alpine@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3
+    entrypoint: [nginx, -g, "daemon off;"]
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    secrets: [tls_certificate, tls_key]
+    networks: [connector, frontend]
+    ports:
+      - "127.0.0.1:${KEYCLOAK_LOGIN_PORT:-9443}:9443"
+      - "127.0.0.1:${KEYCLOAK_ADMIN_PORT:-9444}:9444"
+    depends_on: [keycloak]
+    restart: unless-stopped
+
+networks:
+  frontend:
+  connector:
+    internal: true
+  database:
+    internal: true
+
+volumes:
+  database:
+
+secrets:
+  database_password:
+    file: "${KEYCLOAK_CONFIG_DIR}/database-password"
+  tls_certificate:
+    file: "${KEYCLOAK_CONFIG_DIR}/tls.crt"
+  tls_key:
+    file: "${KEYCLOAK_CONFIG_DIR}/tls.key"
