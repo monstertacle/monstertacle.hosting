@@ -7,7 +7,7 @@ namespace Monstertacle.Hosting.Security;
 
 internal sealed class BrokerPolicy(IConfiguration configuration, string? workloadIssuer)
 {
-    private const int MaximumBytes = 256 * 1024;
+    internal const int MaximumBytes = 256 * 1024;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         AllowDuplicateProperties = false,
@@ -76,8 +76,7 @@ internal sealed class BrokerPolicy(IConfiguration configuration, string? workloa
                 return null;
             }
 
-            var policy = JsonSerializer.Deserialize<Policy>(contents, Json);
-            return Valid(policy) ? policy : null;
+            return Parse(contents);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                           JsonException or ArgumentException or NotSupportedException)
@@ -85,6 +84,21 @@ internal sealed class BrokerPolicy(IConfiguration configuration, string? workloa
             return null;
         }
     }
+
+    internal static Policy? Parse(ReadOnlySpan<byte> contents)
+    {
+        if (contents.Length is 0 or > MaximumBytes)
+        {
+            return null;
+        }
+
+        var policy = ParseJson<Policy>(contents);
+        return Valid(policy) ? policy : null;
+    }
+
+    internal static T? ParseJson<T>(ReadOnlySpan<byte> contents) => JsonSerializer.Deserialize<T>(contents, Json);
+
+    internal static byte[] Serialize(Policy policy) => JsonSerializer.SerializeToUtf8Bytes(policy, Json);
 
     private static bool Valid(Policy? policy)
     {

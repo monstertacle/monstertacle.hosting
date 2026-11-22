@@ -1,0 +1,9 @@
+services:
+  keycloak:
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: "${KEYCLOAK_BOOTSTRAP_USERNAME:-temporary-admin}"
+    secrets: [bootstrap_password]
+
+secrets:
+  bootstrap_password:
+    file: "${KEYCLOAK_CONFIG_DIR:?Set the private Keycloak config directory}/bootstrap-password"

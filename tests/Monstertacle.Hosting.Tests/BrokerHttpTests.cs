@@ -56,7 +56,7 @@ public sealed class BrokerHttpTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.StartMcpAsync(publicIngress: true));
 
         fixture.UseInvalidSigningKey = false;
-        await using var host = await fixture.StartMcpAsync(publicIngress: true);
+        await using var host = await fixture.StartMcpAsync(publicIngress: true, sharedPolicy: true);
         var origin = new Uri(host.Urls.Single());
         using var anonymous = fixture.ConnectMcpHttp(origin);
         using var readiness = await anonymous.GetAsync("/.well-known/hosting-ingress-readiness");
@@ -70,6 +70,16 @@ public sealed class BrokerHttpTests
         var project = new Dictionary<string, object?> { ["project"] = "demo" };
         var page = ReadMcp<SessionPage>(await mcp.CallToolAsync("session_list", project, cancellationToken: deadline.Token));
         Assert.Empty(page.Sessions);
+
+        fixture.SetPolicyWithLanes(["allowed"], []);
+        using var revoked = await http.PostAsJsonAsync("/mcp", new { method = "initialize" }, deadline.Token);
+        Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
+        using var metadata = await anonymous.GetAsync("/.well-known/oauth-protected-resource/mcp", deadline.Token);
+        Assert.Equal(HttpStatusCode.OK, metadata.StatusCode);
+
+        fixture.SetPolicy("allowed");
+        var restored = ReadMcp<SessionPage>(await mcp.CallToolAsync("session_list", project, cancellationToken: deadline.Token));
+        Assert.Empty(restored.Sessions);
     }
 
     [HostedGitHubFact]
@@ -1192,11 +1202,14 @@ public sealed class BrokerHttpTests
             return Connect(Token(subject));
         }
 
-        public async Task<WebApplication> StartMcpAsync(bool publicIngress = false)
+        public async Task<WebApplication> StartMcpAsync(bool publicIngress = false, bool sharedPolicy = false)
         {
-            var edgePolicy = Path.Combine(directory.FullName, "edge-policy.json");
+            var edgePolicy = sharedPolicy ? PolicyPath : Path.Combine(directory.FullName, "edge-policy.json");
             var edgeCertificate = Path.Combine(directory.FullName, "edge.pfx");
-            File.Copy(PolicyPath, edgePolicy, overwrite: true);
+            if (!sharedPolicy)
+            {
+                File.Copy(PolicyPath, edgePolicy, overwrite: true);
+            }
             File.WriteAllBytes(edgeCertificate, edge.Export(X509ContentType.Pfx));
             var builder = WebApplication.CreateBuilder();
             builder.Logging.ClearProviders();

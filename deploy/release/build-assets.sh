@@ -41,7 +41,22 @@ sed -e 's@/worker\([./:]\)@/worker-secondary\1@g' \
     "$bundle/quadlet/hosting-worker.container" > "$bundle/quadlet/hosting-worker-secondary.container"
 cp "$bundle/quadlet/"hosting-worker{,-secondary}-state.volume
 
-cp "$repo/deploy/release/"{README.md,quickstart.sh,fixture-config.sh} "$bundle/"
+cp "$repo/deploy/release/"{README.md,quickstart.sh,fixture-config.sh,fixture-enrollment.sh,fixture-keycloak.sh} "$bundle/"
+mkdir -p "$bundle/keycloak" "$bundle/enrollment/quadlet/"{hosting-broker.container.d,hosting-edge.container.d}
+reference_files=(
+    enrollment/{README.md,compose.yaml,enroll.sh,policy.example.json}
+    keycloak/{README.md,compose.yaml,bootstrap.compose.yaml,start-reference.sh,nginx.conf,render-realm.sh,enroll-user.sh}
+)
+for role in broker edge; do
+    reference_files+=("enrollment/quadlet/hosting-$role.container.d/50-enrollment.conf")
+done
+reference_files+=(keycloak/init-database.sh)
+for path in "${reference_files[@]}"; do
+    [[ -f "$repo/deploy/$path" && ! -L "$repo/deploy/$path" ]]
+    mode=0644
+    if [[ "$path" == keycloak/init-database.sh ]]; then mode=0755; fi
+    install -m "$mode" "$repo/deploy/$path" "$bundle/$path"
+done
 cp "$repo/deploy/smoke-config.sh" "$bundle/"
 cp "$repo/"{LICENSE,THIRD-PARTY-NOTICES.md} "$bundle/"
 sed "s/:RELEASE_TAG$/:$tag/" "$repo/deploy/release/issuer.compose.yaml" > "$bundle/fixture/compose.yaml"

@@ -21,7 +21,7 @@ for asset in SHA256SUMS "$name-bundle.tar.gz" "$name-images.tar.gz"; do
     curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
         --output "$asset" "$base/$asset" || exit 1
 done
-sha256sum --strict --check SHA256SUMS && tar -xzf "$name-bundle.tar.gz"
+sha256sum --strict --check SHA256SUMS && tar --same-permissions -xzf "$name-bundle.tar.gz"
 ```
 
 The checksums cover the deployment files and the image archive.
@@ -95,3 +95,14 @@ qualify the deployment-owned agent composition and complete loopback
 preflight with the approved external issuer, grants and ACME material.
 The [public ingress runbook](https://github.com/monstertacle/monstertacle.hosting/tree/main/deploy/public-ingress)
 covers the separately authorized activation.
+
+## Human access enrollment
+
+Use the [operator enrollment guide](enrollment/README.md) to configure one
+shared policy directory and manage human access through the release image.
+The disposable release fixture also supports `bash quickstart.sh compose enrollment`
+and `bash quickstart.sh quadlet enrollment`.
+
+For a standalone issuer with Docker Compose, see the
+[optional Keycloak reference](keycloak/README.md).
+Run `bash quickstart.sh compose keycloak` for the disposable real-issuer fixture.

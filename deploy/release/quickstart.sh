@@ -7,9 +7,12 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 case "${1:-}" in
     compose) engine=docker ;;
     quadlet) engine=podman ;;
-    *) fail "Usage: bash quickstart.sh compose|quadlet" ;;
+    *) fail "Usage: bash quickstart.sh compose|quadlet [enrollment|keycloak]" ;;
 esac
-[[ $# == 1 && "$(uname -sm)" == 'Linux x86_64' ]] || fail "Select one engine on Linux x86-64."
+enrollment=${2:-}
+[[ $# -le 2 && ( -z "$enrollment" || "$enrollment" == enrollment ||
+    ( "$engine" == docker && "$enrollment" == keycloak ) ) &&
+    "$(uname -sm)" == 'Linux x86_64' ]] || fail "Select one supported fixture mode on Linux x86-64."
 # Fixture credentials always live outside the extracted tree.
 bundle=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 scratch=$(mktemp -d /tmp/hosting-release.XXXXXXXX)
@@ -20,14 +23,21 @@ export HOSTING_EDGE_PORT=${HOSTING_EDGE_PORT:-38443}
 roles=(issuer broker worker worker-secondary edge)
 state_roles=(broker worker worker-secondary)
 started=false
+keycloak_started=false
 units=""
 # shellcheck source=deploy/smoke-config.sh
 source "$bundle/smoke-config.sh"
 # shellcheck source=deploy/release/fixture-config.sh
 source "$bundle/fixture-config.sh"
+# shellcheck source=deploy/release/fixture-enrollment.sh
+source "$bundle/fixture-enrollment.sh"
+# shellcheck source=deploy/release/fixture-keycloak.sh
+source "$bundle/fixture-keycloak.sh"
 
 compose=(docker compose --project-name "$project" --env-file /dev/null
-    -f "$bundle/compose.yaml" -f "$bundle/fixture/compose.yaml")
+    -f "$bundle/compose.yaml")
+if [[ "$enrollment" != keycloak ]]; then compose+=(-f "$bundle/fixture/compose.yaml"); fi
+if [[ -n "$enrollment" ]]; then compose+=(-f "$bundle/enrollment/compose.yaml"); fi
 
 cleanup() {
     local status=$? role kind name
@@ -53,6 +63,9 @@ cleanup() {
                 fi
             done
         fi
+    fi
+    if [[ "$keycloak_started" == true ]]; then
+        "${keycloak_compose[@]}" down --volumes >/dev/null 2>&1 || status=1
     fi
     if [[ -n "$units" ]]; then
         rm -rf -- "$units" || status=1
@@ -93,10 +106,24 @@ mkdir "$HOSTING_CONFIG_DIR"
 issuer=https://issuer:8443
 resource="https://localhost:$HOSTING_EDGE_PORT/mcp"
 subject="granted-$project"
+additional_subject=unlisted
 exec 3>&2
 phase="private bootstrap"
 trap 'printf "Fixture step failed: %s.\n" "$phase" >&3' ERR
+if [[ "$enrollment" == keycloak ]]; then
+    phase="Keycloak reference startup"
+    start_keycloak_fixture > "$scratch/keycloak.log" 2>&1
+fi
 make_fixture > "$scratch/bootstrap.log" 2>&1
+if [[ "$enrollment" == keycloak ]]; then
+    for header in granted unlisted wrong-audience; do
+        cp -- "$scratch/keycloak-$header.header" "$scratch/$header.header"
+    done
+fi
+if [[ -n "$enrollment" ]]; then
+    phase="first operator enrollment"
+    prepare_enrollment > "$scratch/enrollment.log" 2>&1
+fi
 
 start_fixture() {
     local role
@@ -110,6 +137,7 @@ start_fixture() {
         units=$(mktemp -d "$XDG_RUNTIME_DIR/containers/systemd/$project.XXXXXXXX")
         render_quadlet_files "$project" "$units" "$bundle/quadlet"
         render_quadlet_files "$project" "$units" "$bundle/fixture/quadlet"
+        if [[ -n "$enrollment" ]]; then render_enrollment_dropins; fi
         systemctl --user daemon-reload
         started=true
         local -a services=()
@@ -188,8 +216,10 @@ tool session_start "$(start_args)"
 tool session_start "$(start_args)"
 [[ "$(post wrong-audience)" == 401 ]] || fail "Wrong-audience session start did not return 401."
 tool session_start "$(start_args)"
+[[ "$(post wrong-issuer)" == 401 ]] || fail "Wrong-issuer session start did not return 401."
+tool session_start "$(start_args)"
 [[ "$(post unlisted)" == 403 ]] || fail "Unlisted subject session start did not return 403."
-printf 'Admission denied for anonymous, wrong-audience and unlisted requests.\n'
+printf 'Admission denied for anonymous, wrong-issuer, wrong-audience and unlisted requests.\n'
 
 tool session_start "$(start_args)"
 [[ "$(post granted)" == 200 ]] || fail "Granted session start did not return 200."
@@ -224,3 +254,9 @@ for lane in primary secondary; do
         fail "Unexpected deterministic output for $lane."
 done
 printf 'Both worker lanes succeeded. Verified result and both artifacts retrieved (%s).\n' "$1"
+if [[ -n "$enrollment" ]]; then
+    if ! verify_enrollment > "$scratch/enrollment.log" 2>&1; then
+        fail 'Enrollment lifecycle or atomic update checks failed.'
+    fi
+    printf 'Enrollment verified on the shared policy, including conflict, retry and revocation.\n'
+fi
