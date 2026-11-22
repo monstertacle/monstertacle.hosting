@@ -9,16 +9,31 @@ project=${project,,}
 export HOSTING_CONFIG_DIR="$scratch/config"
 export HOSTING_EDGE_PORT="${HOSTING_EDGE_PORT:-28443}"
 compose=(docker compose --project-name "$project" --file "$repo/deploy/compose.yaml")
+engine=docker
 started=false
 quadlet_units=""
+quadlet_images=()
 mode=${1:-}
+if [[ "$mode" == "--quadlet" ]]; then
+    engine=podman
+fi
 cleanup() {
     if [[ -n "$quadlet_units" ]]; then
-        systemctl --user stop hosting-edge.service hosting-worker.service hosting-broker.service >&2 || true
+        systemctl --user stop "$project-edge.service" "$project-worker.service" "$project-broker.service" >&2 || true
         find "$quadlet_units" -depth -delete
         systemctl --user daemon-reload
+        podman volume rm --ignore "systemd-$project-broker-state" "systemd-$project-worker-state" >&2
+        local network
+        for network in "systemd-$project-private" "systemd-$project-outbound"; do
+            if podman network exists "$network"; then
+                podman network rm "$network" >&2
+            fi
+        done
     elif [[ "$started" == true ]]; then
         "${compose[@]}" down --volumes --remove-orphans >&2
+    fi
+    if (( ${#quadlet_images[@]} > 0 )); then
+        podman image rm --ignore "${quadlet_images[@]}" >&2
     fi
     find "$scratch" -depth -delete
 }
@@ -58,10 +73,12 @@ certificate edge-client edge clientAuth
 
 install -m 0644 "$scratch/broker.pfx" "$HOSTING_CONFIG_DIR/broker/server.pfx"
 install -m 0644 "$scratch/worker-client.pfx" "$HOSTING_CONFIG_DIR/worker/client.pfx"
-install -m 0644 "$scratch/broker.pem" "$HOSTING_CONFIG_DIR/worker/ca.pem"
 install -m 0644 "$scratch/edge-server.pfx" "$HOSTING_CONFIG_DIR/edge/server.pfx"
 install -m 0644 "$scratch/edge-client.pfx" "$HOSTING_CONFIG_DIR/edge/client.pfx"
-install -m 0644 "$scratch/broker.pem" "$HOSTING_CONFIG_DIR/edge/ca.pem"
+# Follow the deployment trust model by adding the private broker root to the system roots.
+cat /etc/ssl/certs/ca-certificates.crt "$scratch/broker.pem" > "$scratch/ca.pem"
+install -m 0644 "$scratch/ca.pem" "$HOSTING_CONFIG_DIR/worker/ca.pem"
+install -m 0644 "$scratch/ca.pem" "$HOSTING_CONFIG_DIR/edge/ca.pem"
 chmod 755 "$HOSTING_CONFIG_DIR"/{broker,worker,edge}
 for service in broker edge; do
     printf '{"version":1,"projects":[],"people":[]}\n' > "$HOSTING_CONFIG_DIR/$service/policy.json"
@@ -77,6 +94,7 @@ Broker__Authentication__Scope=sessions
 Broker__Authentication__EdgeCertificateSha256=$(fingerprint edge-client)
 Broker__Workers__smoke__Lane=primary
 Broker__Workers__smoke__CertificateSha256=$(fingerprint worker-client)
+Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics=Information
 EOF_ENV
 cat > "$HOSTING_CONFIG_DIR/edge.env" <<EOF_ENV
 Mcp__Authentication__Issuer=$issuer
@@ -93,64 +111,95 @@ EOF_ENV
 if [[ "$mode" == "--quadlet" ]]; then
     test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
     systemctl --user show-environment >/dev/null
-    for unit in hosting-broker hosting-worker hosting-edge; do
-        if [[ $(systemctl --user show -p LoadState --value "$unit.service") != not-found ]] ||
-            podman container exists "systemd-$unit"; then
-            printf 'Quadlet smoke requires an unused unit and container name: %s\n' "$unit" >&2
-            exit 1
-        fi
-    done
-    for state in broker worker; do
-        if podman volume exists "systemd-hosting-$state-state"; then
-            printf 'Quadlet smoke requires an unused volume: %s\n' "$state" >&2
-            exit 1
-        fi
-    done
     for target in control-plane worker-host mcp-host; do
-        podman build --target "$target" -t "localhost/monstertacle-hosting-$target:local" "$repo"
+        image="localhost/$project-$target:local"
+        podman build --target "$target" -t "$image" "$repo"
+        quadlet_images+=("$image")
     done
     mkdir -p "${XDG_RUNTIME_DIR:?Set XDG_RUNTIME_DIR}/containers/systemd"
     quadlet_units=$(mktemp -d "$XDG_RUNTIME_DIR/containers/systemd/hosting-smoke.XXXXXXXX")
     for unit in "$repo"/deploy/quadlet/*; do
-        sed -e "s|%h/\.config/monstertacle-hosting|$HOSTING_CONFIG_DIR|g" \
+        filename=${unit##*/}
+        sed -e "s|localhost/monstertacle-hosting-|localhost/$project-|g" \
+            -e "s|^\(After=\|Requires=\|Network=\|Volume=\)hosting-|\1$project-|" \
+            -e "s|%h/\.config/monstertacle-hosting|$HOSTING_CONFIG_DIR|g" \
             -e "s|^PublishPort=127\.0\.0\.1:8443:8443$|PublishPort=127.0.0.1:$HOSTING_EDGE_PORT:8443|" \
-            "$unit" > "$quadlet_units/${unit##*/}"
+            "$unit" > "$quadlet_units/$project-${filename#hosting-}"
     done
     systemctl --user daemon-reload
-    systemctl --user start hosting-broker.service hosting-worker.service hosting-edge.service
+    systemctl --user start "$project-broker.service" "$project-worker.service" "$project-edge.service"
 else
     "${compose[@]}" build
     started=true
     "${compose[@]}" up --detach
 fi
 
-exec_service() {
-    local service=$1
-    shift
+container_id() {
     if [[ "$mode" == "--quadlet" ]]; then
-        podman exec "systemd-hosting-$service" "$@"
+        printf '%s\n' "systemd-$project-$1"
     else
-        "${compose[@]}" exec -T "$service" "$@"
+        "${compose[@]}" ps --quiet "$1"
     fi
 }
+
+sqlite_ready() {
+    local id=$1 path=$2 snapshot="$scratch/${2##*/}"
+    "$engine" cp "$id:$path" "$snapshot" &&
+        cmp --silent --bytes=16 "$snapshot" <(printf 'SQLite format 3\0')
+}
+
+verify_runtime() {
+    local service=$1 id=$2
+    "$engine" container inspect "$id" | jq -e '
+        .[0] | .State.Running and .Config.User == "1654" and .HostConfig.ReadonlyRootfs
+        and any(.Mounts[]; .Destination == "/run/hosting" and .RW == false)
+    ' >/dev/null || { printf 'Unexpected runtime configuration for %s\n' "$service" >&2; return 1; }
+
+    # Export inspects the image-backed directory below the volume mount.
+    "$engine" export "$id" | tar --numeric-owner -tvf - | awk -v service="$service" '
+        {
+            path = $6
+            sub(/^\.?\//, "", path)
+            sub(/\/$/, "", path)
+            if (path == "var/lib/hosting" && $1 == "drwx------" && $2 == "1654/0") state = 1
+            if (path ~ /^(usr\/)?s?bin\/(sh|bash|dash|ash|zsh|ksh|busybox|apt|apt-get|dpkg|apk|dnf|yum|rpm|microdnf)$/) {
+                print service ": unexpected executable " path > "/dev/stderr"
+                unexpected = 1
+            }
+        }
+        END {
+            if (!state) print service ": state root must have mode 0700 and owner 1654:0" > "/dev/stderr"
+            exit (!state || unexpected)
+        }
+    '
+
+    "$engine" cp "$id:/etc/ssl/certs/ca-certificates.crt" "$scratch/$service-ca.pem"
+    grep -q '^-----BEGIN CERTIFICATE-----$' "$scratch/$service-ca.pem"
+    openssl crl2pkcs7 -nocrl -certfile "$scratch/$service-ca.pem" -out "$scratch/$service-ca.p7"
+}
+
+broker=$(container_id broker)
+worker=$(container_id worker)
+edge=$(container_id edge)
 base="https://localhost:$HOSTING_EDGE_PORT"
 request=(curl --silent --show-error --noproxy '*' --cacert "$scratch/edge-server.pem" --max-time 3)
 for attempt in {1..30}; do
     if "${request[@]}" --fail "$base/health/live" >/dev/null 2>&1 &&
-        exec_service worker test -s /var/lib/hosting/runtime/worker-ledger.db &&
-        exec_service broker test -s /var/lib/hosting/broker.db; then
+        "$engine" logs "$broker" 2>&1 |
+            grep -E 'Request finished .* POST https://broker:8443/v1/worker/claims - 204 ' >/dev/null; then
         break
+    fi
+    if (( attempt == 30 )); then
+        printf 'Timed out waiting for edge HTTPS and a successful worker claim over broker mTLS.\n' >&2
+        exit 1
     fi
     sleep 1
 done
-exec_service worker test -s /var/lib/hosting/runtime/worker-ledger.db
-exec_service broker test -s /var/lib/hosting/broker.db
-for service in broker worker edge; do
-    if [[ $(exec_service "$service" id -u) -eq 0 ]]; then
-        printf '%s is running as root\n' "$service" >&2
-        exit 1
-    fi
-done
+sqlite_ready "$broker" /var/lib/hosting/broker.db
+sqlite_ready "$worker" /var/lib/hosting/runtime/worker-ledger.db
+verify_runtime broker "$broker"
+verify_runtime worker "$worker"
+verify_runtime edge "$edge"
 
 "${request[@]}" --fail "$base/.well-known/oauth-protected-resource/mcp" |
     jq -e --arg resource "$resource" '.resource == $resource and .authorization_servers == ["https://identity.invalid"]' >/dev/null
