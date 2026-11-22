@@ -38,6 +38,7 @@ enrollment/quadlet/hosting-broker.container.d/50-enrollment.conf f
 enrollment/quadlet/hosting-edge.container.d/50-enrollment.conf f
 keycloak/README.md f
 keycloak/bootstrap.compose.yaml f
+keycloak/clients.example.json f
 keycloak/compose.yaml f
 keycloak/enroll-user.sh f
 keycloak/init-database.sh f
