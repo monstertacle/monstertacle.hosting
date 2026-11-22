@@ -3,9 +3,21 @@
 The Linux image has three build targets for .NET 11. The broker and worker
 have no published ports. The MCP edge publishes HTTPS on loopback in the
 examples. The broker and edge join an outbound network for issuer discovery
-and JWKS. Put the public edge behind a deployment-approved HTTPS ingress.
+and JWKS. Publish the edge through a deployment-approved HTTPS ingress.
 Keep broker traffic on private networks and preserve client certificate
 authentication on the broker connection.
+
+Keep ASP.NET Core 11 Kestrel as the TLS application server. Within Hosting,
+only the public MCP edge needs a publicly trusted certificate, such as one
+from Let's Encrypt. Run ACME issuance and renewal outside the application
+image and mount the renewed certificate directory read-only. Kestrel's
+`Certificate` settings accept a PFX via `Path` or a PEM chain and key via
+`Path` and `KeyPath`. Keep broker and worker mTLS certificates separate.
+Public MCP ingress needs approved TCP 443 routing to the edge. DNS-01
+requires control of the validation DNS record and avoids opening TCP 80.
+HTTP-01 requires public TCP 80 for the challenge.
+[Kestrel endpoints](https://learn.microsoft.com/aspnet/core/fundamentals/servers/kestrel/endpoints)
+and [Let's Encrypt challenge types](https://letsencrypt.org/docs/challenge-types/).
 
 ## Configuration
 

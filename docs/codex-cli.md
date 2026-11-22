@@ -38,10 +38,11 @@ out of chat. The flags above were checked with Codex CLI 0.171.0. See the
 
 ## Submit and recover a session
 
-Generate a fresh UUID for each new task, for example with `uuidgen`. Save
-that value, the project ID and the exact task before submitting. Save the
-returned `sessionId` (SessionId) alongside them. Substitute your values in
-these example prompts.
+Generate a fresh mutation UUID for each new task. Use `uuidgen` where
+available, `cat /proc/sys/kernel/random/uuid` on Linux, or
+`[guid]::NewGuid().ToString()` in PowerShell. Save the UUID, the project ID
+and the exact task before submitting. Save the returned `sessionId`
+(SessionId) alongside them. Substitute your values in these example prompts.
 
 > Use Hosting's `session_start` for project PROJECT_ID with mutation ID
 > MUTATION_UUID and task “Summarize the approved project brief.” Return the
@@ -73,9 +74,10 @@ artifact using the IDs and name from the manifest.
 | `session_artifact` | `sessionId`, `jobId`, `name` | Bounded base64 content and descriptor with byte count and SHA-256 |
 
 Hosting checks current grants by project and lane, along with session
-ownership. Submitting requires `start` on each configured lane. Status and
-lookup require `read`. Result reads require `read` and `result` on every child
-lane. An artifact read requires `read` and `artifact` on the artifact's lane.
+ownership. Submitting requires `start` and `read` on each configured lane.
+Status and lookup require `read` on every child lane. Result reads require
+`read` and `result` on every child lane. An artifact read requires `read`
+and `artifact` on the artifact's lane.
 If a tool is available in `/mcp` but Hosting denies a call, ask your operator
 to verify your identity, session ownership and grants.
 
