@@ -148,6 +148,17 @@ public sealed class BrokerHttpTests
         var session = ReadMcpStatus(await client.CallToolAsync("session_start", start, cancellationToken: ct));
         var lookup = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo" };
         Assert.Equal(session.SessionId, ReadMcpStatus(await client.CallToolAsync("session_lookup", lookup, cancellationToken: ct)).SessionId);
+        foreach (var command in new[]
+        {
+            new[] { "submit", mutation.ToString("D"), "fixture" },
+            new[] { "status", session.SessionId.ToString("D") },
+            new[] { "lookup", mutation.ToString("D") }
+        })
+        {
+            var (exit, body) = await fixture.RunToolAsync(command, endpoint, exchange.Endpoint, Assertion(github));
+            Assert.True(exit == 0, exit == 0 ? null : body.GetProperty("error").GetString());
+            Assert.Equal(session.SessionId, body.GetProperty("sessionId").GetGuid());
+        }
         using var humanRead = await human.GetAsync($"{Sessions}/{session.SessionId}", ct);
         Assert.Equal(HttpStatusCode.NotFound, humanRead.StatusCode);
 
@@ -872,6 +883,22 @@ public sealed class BrokerHttpTests
 
         public HttpClient ConnectMcpToken(Uri endpoint, string token) => Connect(endpoint, token, null);
 
+        public async Task<(int Exit, JsonElement Body)> RunToolAsync(string[] args, Uri endpoint, Uri tokenEndpoint, string assertion)
+        {
+            var settings = new Dictionary<string, string>
+            {
+                ["HOSTING_PROJECT"] = "demo", ["HOSTING_MCP_URL"] = Audience,
+                ["HOSTING_TOKEN_URL"] = tokenEndpoint.AbsoluteUri, ["HOSTING_SCOPE"] = WorkloadScope,
+                ["HOSTING_ASSERTION_AUDIENCE"] = AssertionAudience,
+                ["ACTIONS_ID_TOKEN_REQUEST_URL"] = "https://pipelines.actions.githubusercontent.com/fixture?api-version=1",
+                ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = "fixture-request-token"
+            };
+            using var output = new StringWriter();
+            var exit = await Tool.Program.RunAsync(args, settings.GetValueOrDefault, output, new ToolHandler(server, assertion, endpoint));
+            using var document = JsonDocument.Parse(output.ToString());
+            return (exit, document.RootElement.Clone());
+        }
+
         public async Task StopAsync()
         {
             if (app is { } running)
@@ -1004,6 +1031,42 @@ public sealed class BrokerHttpTests
             private long extraMinutes;
             public override DateTimeOffset GetUtcNow() => DateTimeOffset.UtcNow.AddMinutes(Interlocked.Read(ref extraMinutes));
             public void Advance() => Interlocked.Add(ref extraMinutes, 6);
+        }
+
+        private sealed class ToolHandler : HttpClientHandler
+        {
+            private readonly string assertion;
+            private readonly Uri endpoint;
+
+            public ToolHandler(X509Certificate2 server, string assertion, Uri endpoint)
+            {
+                this.assertion = assertion;
+                this.endpoint = endpoint;
+                AllowAutoRedirect = false;
+                UseCookies = false;
+                ServerCertificateCustomValidationCallback = (_, certificate, _, _) => server.Equals(certificate);
+            }
+
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                if (request.RequestUri?.Host == "pipelines.actions.githubusercontent.com")
+                {
+                    Assert.Equal(HttpMethod.Get, request.Method);
+                    Assert.Equal("?api-version=1&audience=urn%3Ahosting%3Afixture", request.RequestUri.Query);
+                    Assert.Equal("fixture-request-token", request.Headers.Authorization?.Parameter);
+                    return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = JsonContent.Create(new { value = assertion })
+                    });
+                }
+
+                Assert.NotEqual(assertion, request.Headers.Authorization?.Parameter);
+                if (request.RequestUri?.AbsoluteUri == Audience)
+                {
+                    request.RequestUri = endpoint;
+                }
+                return base.SendAsync(request, cancellationToken);
+            }
         }
 
         private sealed class DiscoveryHandler : HttpClientHandler

@@ -4,6 +4,7 @@
     <Project Path="src/Monstertacle.Hosting.ControlPlane/Monstertacle.Hosting.ControlPlane.csproj" />
     <Project Path="src/Monstertacle.Hosting.McpHost/Monstertacle.Hosting.McpHost.csproj" />
     <Project Path="src/Monstertacle.Hosting.Security/Monstertacle.Hosting.Security.csproj" />
+    <Project Path="src/Monstertacle.Hosting.Tool/Monstertacle.Hosting.Tool.csproj" />
     <Project Path="src/Monstertacle.Hosting.WorkerHost/Monstertacle.Hosting.WorkerHost.csproj" />
   </Folder>
   <Folder Name="/tests/">
