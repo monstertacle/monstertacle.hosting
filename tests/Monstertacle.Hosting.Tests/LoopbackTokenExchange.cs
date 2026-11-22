@@ -25,6 +25,9 @@ internal sealed class LoopbackTokenExchange(
     private WebApplication? app;
     public string Issuer => app!.Urls.Single().TrimEnd('/');
     public Uri Endpoint => new(Issuer + "/token");
+    public Uri RedirectEndpoint => new(Issuer + "/redirect");
+    public int RedirectTargetRequests => Volatile.Read(ref redirectTargetRequests);
+    private int redirectTargetRequests;
 
     public async Task StartAsync()
     {
@@ -44,6 +47,12 @@ internal sealed class LoopbackTokenExchange(
             } } });
         });
         app.MapPost("/token", (Delegate)ExchangeAsync);
+        app.MapPost("/redirect", () => Results.Redirect("/redirect-target", preserveMethod: true));
+        app.MapPost("/redirect-target", () =>
+        {
+            Interlocked.Increment(ref redirectTargetRequests);
+            return Results.BadRequest();
+        });
         await app.StartAsync();
     }
 
@@ -70,17 +79,24 @@ internal sealed class LoopbackTokenExchange(
             return Results.BadRequest(new { error = "invalid_grant" });
         }
 
-        var now = DateTime.UtcNow;
-        var token = new JwtSecurityToken(Issuer, resource,
-            [new("sub", subject), new("scope", scope),
-             new("iat", EpochTime.GetIntDate(now).ToString(CultureInfo.InvariantCulture), ClaimValueTypes.Integer64)],
-            now, now.AddSeconds(TokenSeconds), new SigningCredentials(new RsaSecurityKey(signing) { KeyId = "exchange" }, SecurityAlgorithms.RsaSha256));
-        token.Header["typ"] = "at+jwt";
         return Results.Json(new
         {
-            access_token = new JwtSecurityTokenHandler().WriteToken(token), issued_token_type = AccessTokenType,
+            access_token = Sign(), issued_token_type = AccessTokenType,
             token_type = "Bearer", expires_in = TokenSeconds, scope
         });
+    }
+
+    internal string Sign(string? tokenIssuer = null, string? audience = null, string? tokenSubject = null,
+        bool expired = false, RSA? otherKey = null)
+    {
+        var issued = DateTime.UtcNow.AddMinutes(expired ? -5 : 0);
+        var key = new RsaSecurityKey(otherKey ?? signing) { KeyId = "exchange" };
+        var token = new JwtSecurityToken(tokenIssuer ?? Issuer, audience ?? resource,
+            [new("sub", tokenSubject ?? subject), new("scope", scope),
+             new("iat", EpochTime.GetIntDate(issued).ToString(CultureInfo.InvariantCulture), ClaimValueTypes.Integer64)],
+            issued, issued.AddSeconds(TokenSeconds), new SigningCredentials(key, SecurityAlgorithms.RsaSha256));
+        token.Header["typ"] = "at+jwt";
+        return new JwtSecurityTokenHandler().WriteToken(token);
     }
 
     private static bool Has(IFormCollection form, string name, string value) =>

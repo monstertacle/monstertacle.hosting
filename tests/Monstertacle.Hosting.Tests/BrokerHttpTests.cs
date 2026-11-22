@@ -205,6 +205,43 @@ public sealed class BrokerHttpTests
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var ct = timeout.Token;
         await using var client = await ConnectMcp(endpoint, http, ct);
+        using var wrongKey = RSA.Create(2048);
+        var rejectedTokens = new (string? Token, HttpStatusCode Status)[]
+        {
+            (null, HttpStatusCode.Unauthorized),
+            (Assertion(github), HttpStatusCode.Unauthorized),
+            (exchange.Sign(tokenIssuer: "https://wrong.example"), HttpStatusCode.Unauthorized),
+            (exchange.Sign(audience: Audience + "/"), HttpStatusCode.Unauthorized),
+            (exchange.Sign(expired: true), HttpStatusCode.Unauthorized),
+            (exchange.Sign(otherKey: wrongKey), HttpStatusCode.Unauthorized),
+            (exchange.Sign(tokenSubject: "unlisted-workload"), HttpStatusCode.Forbidden)
+        };
+        foreach (var (token, status) in rejectedTokens)
+        {
+            var invalidMutation = Guid.NewGuid();
+            using var edgeCaller = fixture.ConnectMcpToken(endpoint, token);
+            using var brokerCaller = fixture.Connect(token);
+            using var edgeRejection = await SendMcp(edgeCaller, endpoint, "tools/call",
+                new { name = "session_start", arguments = new { mutationId = invalidMutation, project = "demo", task = "fixture" } }, ct);
+            using var brokerRejection = await brokerCaller.PostAsJsonAsync(Sessions, new StartSession(invalidMutation, "demo", "fixture"), ct);
+            Assert.Equal(status, edgeRejection.StatusCode);
+            Assert.Equal(status, brokerRejection.StatusCode);
+            Assert.False(fixture.HasAdmission(invalidMutation));
+        }
+
+        using var productionHandler = (HttpClientHandler)Tool.TokenExchange.CreateHandler();
+        fixture.PinLoopbackCertificate(productionHandler);
+        using var redirectHttp = Tool.TokenExchange.CreateClient(productionHandler, disposeHandler: false);
+        await Assert.ThrowsAsync<Tool.ToolException>(() => Tool.TokenExchange.ExchangeAsync(redirectHttp,
+            exchange.RedirectEndpoint, Assertion(github), new Uri(Audience), WorkloadScope, ct));
+        var redirectedMutation = Guid.NewGuid();
+        var (redirectExit, redirectBody) = await fixture.RunToolAsync(
+            ["submit", redirectedMutation.ToString("D"), "fixture"], endpoint, exchange.RedirectEndpoint, Assertion(github));
+        Assert.Equal(1, redirectExit);
+        Assert.Equal("Token exchange failed.", redirectBody.GetProperty("error").GetString());
+        Assert.Equal(0, exchange.RedirectTargetRequests);
+        Assert.False(fixture.HasAdmission(redirectedMutation));
+
         var deniedId = Guid.NewGuid();
         var denied = new Dictionary<string, object?> { ["mutationId"] = deniedId, ["project"] = "other", ["task"] = "fixture" };
         Assert.True((await client.CallToolAsync("session_start", denied, cancellationToken: ct)).IsError);
@@ -213,6 +250,23 @@ public sealed class BrokerHttpTests
         var mutation = Guid.NewGuid();
         var start = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo", ["task"] = "fixture" };
         var session = ReadMcpStatus(await client.CallToolAsync("session_start", start, cancellationToken: ct));
+        using var anonymous = fixture.ConnectMcpHttp(endpoint);
+        foreach (var (method, parameters) in new (string, object)[]
+        {
+            ("initialize", new { protocolVersion = "2025-11-25", capabilities = new { }, clientInfo = new { name = "fixture", version = "1" } }),
+            ("tools/list", new { }),
+            ("tools/call", new { name = "session_start", arguments = start })
+        })
+        {
+            using var allowed = await SendMcp(http, endpoint, method, parameters, ct);
+            using var unauthorized = await SendMcp(anonymous, endpoint, method, parameters, ct);
+            Assert.Equal(HttpStatusCode.OK, allowed.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+        }
+        using var liveness = await anonymous.GetAsync("/health/live", ct);
+        Assert.Equal(HttpStatusCode.NoContent, liveness.StatusCode);
+        using var metadata = await anonymous.GetAsync("/.well-known/oauth-protected-resource/mcp", ct);
+        Assert.Equal(HttpStatusCode.OK, metadata.StatusCode);
         var lookup = new Dictionary<string, object?> { ["mutationId"] = mutation, ["project"] = "demo" };
         Assert.Equal(session.SessionId, ReadMcpStatus(await client.CallToolAsync("session_lookup", lookup, cancellationToken: ct)).SessionId);
         foreach (var command in new[]
@@ -235,10 +289,18 @@ public sealed class BrokerHttpTests
         fixture.SetWorkloadPolicy(DateTimeOffset.UtcNow.AddMinutes(-1));
         using var expired = await worker.PostAsync(dispatch, null, ct);
         Assert.Equal(HttpStatusCode.Forbidden, expired.StatusCode);
-        Assert.True((await client.CallToolAsync("session_start", start, cancellationToken: ct)).IsError);
+        var expiredMutation = Guid.NewGuid();
+        Assert.True((await client.CallToolAsync("session_start", new Dictionary<string, object?>(start)
+            { ["mutationId"] = expiredMutation }, cancellationToken: ct)).IsError);
+        Assert.False(fixture.HasAdmission(expiredMutation));
         fixture.SetWorkloadPolicy(null);
         using var revoked = await worker.PostAsync(dispatch, null, ct);
         Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
+        Assert.True((await client.CallToolAsync("session_start", start, cancellationToken: ct)).IsError);
+        var revokedMutation = Guid.NewGuid();
+        Assert.True((await client.CallToolAsync("session_start", new Dictionary<string, object?>(start)
+            { ["mutationId"] = revokedMutation }, cancellationToken: ct)).IsError);
+        Assert.False(fixture.HasAdmission(revokedMutation));
         Assert.True((await client.CallToolAsync("session_lookup", lookup, cancellationToken: ct)).IsError);
     }
 
@@ -801,6 +863,18 @@ public sealed class BrokerHttpTests
             TransportMode = HttpTransportMode.StreamableHttp
         }, client), cancellationToken: cancellationToken);
 
+    private static async Task<HttpResponseMessage> SendMcp(HttpClient client, Uri endpoint, string method, object parameters,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = JsonContent.Create(new { jsonrpc = "2.0", id = 1, method, @params = parameters })
+        };
+        request.Headers.Accept.ParseAdd("application/json, text/event-stream");
+        request.Headers.Add("MCP-Protocol-Version", "2025-11-25");
+        return await client.SendAsync(request, cancellationToken);
+    }
+
     private static SessionStatus ReadMcpStatus(ModelContextProtocol.Protocol.CallToolResult result) =>
         ReadMcp<SessionStatus>(result);
 
@@ -949,7 +1023,10 @@ public sealed class BrokerHttpTests
         public HttpClient ConnectMcpHttp(Uri endpoint, string? subject = null) =>
             Connect(endpoint, subject is null ? null : Token(subject), null);
 
-        public HttpClient ConnectMcpToken(Uri endpoint, string token) => Connect(endpoint, token, null);
+        public HttpClient ConnectMcpToken(Uri endpoint, string? token) => Connect(endpoint, token, null);
+
+        public void PinLoopbackCertificate(HttpClientHandler handler) =>
+            handler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) => server.Equals(certificate);
 
         public async Task<(int Exit, JsonElement Body)> RunToolAsync(string[] args, Uri endpoint, Uri tokenEndpoint, string assertion)
         {
