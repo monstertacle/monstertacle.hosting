@@ -22,6 +22,9 @@ jobs:
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release
       - run: dotnet test --no-build -c Release
+      - name: Pack and restore the pinned local tool
+        shell: pwsh
+        run: ./tests/verify-tool-package.ps1
 
   linux-containers:
     runs-on: ubuntu-latest
