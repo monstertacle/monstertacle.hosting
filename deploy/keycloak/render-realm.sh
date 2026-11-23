@@ -83,7 +83,9 @@ jq --arg format "$format" '
       protocolMapper: "oidc-sub-mapper",
       config: {"access.token.claim":"true", "introspection.token.claim":"true"}
     }]
-  } + if .type == "chat-confidential" then {clientAuthenticatorType: "client-secret"} else {} end;
+  } + if .type == "chat-confidential" then {clientAuthenticatorType: "client-secret"}
+      elif .type == "shared-public" then {webOrigins: []}
+      else {} end;
   (.clients | map(static_client)) as $clients
   | .resource as $audience
   | if $format == "clients" then $clients else {

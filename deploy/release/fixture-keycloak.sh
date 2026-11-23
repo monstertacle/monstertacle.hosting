@@ -321,14 +321,14 @@ qualify_shared_client() {
     loopback=$(jq -er '.clients[0].redirectUris[0]' "$source")
     callback_https=$(jq -er '.clients[0].redirectUris[1]' "$source")
     phase="Keycloak shared realm import"
-    [[ "$(bash "$apply" "$source" "$scratch/admin-token")" == 'Shared OAuth client unchanged.' ]]
+    assert_shared_application unchanged "$apply" "$source"
     keycloak_code person-one shared-import shared-loopback "$loopback"
     keycloak_code person-one shared-import shared-https "$callback_https"
 
     phase="Keycloak shared client creation and repeat application"
     jq '.clients[0].id = "shared-created"' "$source" > "$changed"
-    [[ "$(bash "$apply" "$changed" "$scratch/admin-token")" == 'Shared OAuth client registered.' ]]
-    [[ "$(bash "$apply" "$changed" "$scratch/admin-token")" == 'Shared OAuth client unchanged.' ]]
+    assert_shared_application registered "$apply" "$changed"
+    assert_shared_application unchanged "$apply" "$changed"
     keycloak_request --fail -H "@$scratch/keycloak-admin.header" "$admin_clients?clientId=shared-created" |
         jq -er 'select(length==1) | .[0].id' > "$scratch/shared-id"
     current_id=$(< "$scratch/shared-id")
@@ -336,8 +336,8 @@ qualify_shared_client() {
     phase="Keycloak compatible callback update"
     jq --arg callback "$callback_https-next" \
         '.clients[0] |= (.id="shared-created" | .redirectUris[1]=$callback)' "$source" > "$changed"
-    [[ "$(bash "$apply" "$changed" "$scratch/admin-token")" == 'Shared OAuth client updated.' ]]
-    [[ "$(bash "$apply" "$changed" "$scratch/admin-token")" == 'Shared OAuth client unchanged.' ]]
+    assert_shared_application updated "$apply" "$changed"
+    assert_shared_application unchanged "$apply" "$changed"
     keycloak_request --fail -H "@$scratch/keycloak-admin.header" "$admin_clients?clientId=shared-created" |
         jq -e --arg id "$current_id" 'length==1 and .[0].id==$id' >/dev/null
     keycloak_code person-one shared-created wrong-redirect "$callback_https"
@@ -354,4 +354,22 @@ qualify_shared_client() {
     if bash "$apply" "$changed" "$scratch/admin-token" > "$scratch/conflict.log" 2>&1; then return 1; fi
     grep -Fq 'Invalid static client manifest' "$scratch/conflict.log"
     cp "$scratch/keycloak-shared-upgraded.header" "$scratch/keycloak-granted.header"
+}
+
+assert_shared_application() {
+    local expected=$1 apply=$2 manifest=$3 outcome
+    if ! outcome=$(bash "$apply" "$manifest" "$scratch/admin-token" 2> "$scratch/shared-result.log"); then
+        # Only emit fixed error categories, never HTTP responses or private inputs.
+        if grep -q '^The existing sessions scope does not match' "$scratch/shared-result.log"; then
+            phase+=" (scope rejected)"
+        elif grep -q '^The existing client' "$scratch/shared-result.log"; then
+            phase+=" (client rejected)"
+        elif grep -q '^The private admin request failed' "$scratch/shared-result.log"; then
+            phase+=" (admin request failed)"
+        else
+            phase+=" (application error)"
+        fi
+        return 1
+    fi
+    [[ "$outcome" == "Shared OAuth client $expected." ]]
 }

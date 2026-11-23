@@ -63,12 +63,15 @@ scope=$(jq -er '[.[] | select(.name=="sessions")] | select(length==1) | .[0].id'
 validate_id "$scope" || fail 'The scope identifier was invalid.'
 expect 200 "$base/client-scopes/$scope"
 jq -e --arg resource "$resource" '
+    def audience: .protocolMapper=="oidc-audience-mapper" and
+        .config["included.custom.audience"]==$resource and .config["access.token.claim"]=="true" and
+        .config["id.token.claim"]=="false" and (.config["included.client.audience"] // "")=="";
+    def subject: .protocolMapper=="oidc-sub-mapper" and .config["access.token.claim"]=="true";
     .name=="sessions" and .protocol=="openid-connect" and
     .attributes["include.in.token.scope"]=="true" and
-    (.protocolMappers | length==1 and (.[0] |
-        .protocol=="openid-connect" and .protocolMapper=="oidc-audience-mapper" and
-        .config["included.custom.audience"]==$resource and .config["access.token.claim"]=="true" and
-        .config["id.token.claim"]=="false" and (.config["included.client.audience"] // "")==""))
+    (.protocolMappers | ([.[] | select(audience)]|length)==1 and
+        ([.[] | select(subject)]|length)<=1 and
+        all(.[]; .protocol=="openid-connect" and (audience or subject)))
 ' "$work/response" >/dev/null || fail 'The existing sessions scope does not match the manifest resource.'
 
 find_client() {
@@ -85,12 +88,13 @@ find_client() {
 read_compatible_client() {
     expect 200 "$base/clients/$id"
     jq -e --arg client "$client" '
+        ([.redirectUris[] | split("/")[:3] | join("/") | ascii_downcase]) as $origins |
         .clientId==$client and .enabled==true and .protocol=="openid-connect" and
         .publicClient==true and .standardFlowEnabled==true and .directAccessGrantsEnabled==false and
         .implicitFlowEnabled==false and .serviceAccountsEnabled==false and .fullScopeAllowed==false and
         .attributes["pkce.code.challenge.method"]=="S256" and
         .attributes["exclude.issuer.from.auth.response"]!="true" and
-        (.webOrigins // [] | length==0) and
+        all((.webOrigins // [])[]; ascii_downcase as $origin | $origins | index($origin)!=null) and
         (.protocolMappers | length==1 and (.[0] |
             .protocol=="openid-connect" and .protocolMapper=="oidc-sub-mapper" and
             .config["access.token.claim"]=="true"))
@@ -121,7 +125,11 @@ else
 fi
 read_compatible_client
 if ! callbacks_match; then
-    jq --slurpfile desired "$work/desired" '.redirectUris=$desired[0].redirectUris' "$work/current" > "$work/update"
+    jq --slurpfile desired "$work/desired" '
+        .redirectUris=$desired[0].redirectUris |
+        ([.redirectUris[] | split("/")[:3] | join("/") | ascii_downcase]) as $origins |
+        .webOrigins |= map(select(ascii_downcase as $origin | $origins | index($origin)!=null))
+    ' "$work/current" > "$work/update"
     expect 204 -X PUT -H 'Content-Type: application/json' --data-binary "@$work/update" "$base/clients/$id"
     read_compatible_client
     callbacks_match || fail 'The callback update could not be verified.'
