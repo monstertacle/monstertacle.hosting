@@ -106,6 +106,8 @@ and `bash quickstart.sh quadlet enrollment`.
 For a standalone issuer with Docker Compose, see the
 [optional Keycloak reference](keycloak/README.md).
 It includes a static OAuth client manifest example for a shared MCP endpoint.
+The Keycloak reference also includes a shared OAuth client manifest and a
+repeatable private admin command for existing realms.
 Run `bash quickstart.sh compose keycloak` to check repeatable rendering and
 exercise the public and confidential registrations with a disposable issuer.
 

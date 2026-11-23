@@ -1,0 +1,13 @@
+{
+  "resource": "https://mcp.example.net/mcp",
+  "clients": [
+    {
+      "id": "hosting-mcp",
+      "type": "shared-public",
+      "redirectUris": [
+        "http://127.0.0.1:19876/mcp/oauth/callback",
+        "https://chat.example.net/plugin/oauth/callback"
+      ]
+    }
+  ]
+}
