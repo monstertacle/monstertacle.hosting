@@ -113,8 +113,11 @@ start_keycloak_fixture() {
     jq --arg resource "$resource" '.resource = $resource' "$bundle/keycloak/clients.example.json" > "$scratch/clients.json"
     callback=$(jq -er '.clients[0].redirectUris[0]' "$scratch/clients.json")
     chat_callback=$(jq -er '.clients[1].redirectUris[0]' "$scratch/clients.json")
+    jq --arg resource "$resource" '.resource = $resource | .clients[0].id = "shared-import"' \
+        "$bundle/keycloak/shared-client.example.json" > "$scratch/shared-import.json"
+    bash "$bundle/keycloak/render-realm.sh" --clients "$scratch/shared-import.json" > "$scratch/shared-rendered.json"
     bash "$bundle/keycloak/render-realm.sh" --manifest "$scratch/clients.json" |
-        jq '.clients += [(.clients[0] | .clientId = "wrong-audience" | .protocolMappers += [
+        jq --slurpfile shared "$scratch/shared-rendered.json" '.clients += $shared[0] + [(.clients[0] | .clientId = "wrong-audience" | .protocolMappers += [
             {name:"Extra audience",protocol:"openid-connect",protocolMapper:"oidc-audience-mapper",
                 config:{"included.custom.audience":"https://other.example.test/mcp","access.token.claim":"true"}}
         ])]' > "$KEYCLOAK_CONFIG_DIR/realm.json"
@@ -166,6 +169,9 @@ EOF_NETWORK
         jq -e --arg issuer "$issuer" '
             .issuer == $issuer and .authorization_endpoint == ($issuer + "/protocol/openid-connect/auth")
             and .token_endpoint == ($issuer + "/protocol/openid-connect/token")
+            and (.authorization_response_iss_parameter_supported == true)
+            and (has("registration_endpoint") | not)
+            and ([.token_endpoint_auth_methods_supported[] | select(. == "none")] | length == 1)
         ' "$scratch/$path.json" >/dev/null
     done
     jq -e '.code_challenge_methods_supported | index("S256") != null' "$scratch/discovery.json" >/dev/null
@@ -228,12 +234,15 @@ EOF_NETWORK
     keycloak_code person-one example-chat-one confidential-missing-verifier "$chat_callback" "$scratch/chat-secret"
     keycloak_code person-one example-chat-one confidential "$chat_callback" "$scratch/chat-secret"
     keycloak_code person-one example-chat-two chat-public "$(jq -er '.clients[2].redirectUris[0]' "$scratch/clients.json")"
+    qualify_shared_client "$admin_clients"
     compose+=(-f "$scratch/hosting-keycloak-network.yaml")
 }
 
 keycloak_code() {
     local user=$1 client=$2 test_case=$3 redirect_uri=${4:-$callback} client_secret=${5:-}
     local directory status login_url query redirect encoded remainder
+    local -a requested_scopes=(--data-urlencode "scope=openid sessions")
+    if [[ "$test_case" == shared-* ]]; then requested_scopes=(); fi
     local protocol="$issuer/protocol/openid-connect"
     directory=$(mktemp -d "$scratch/oauth.XXXXXXXX")
     openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n' > "$directory/verifier"
@@ -242,7 +251,7 @@ keycloak_code() {
     phase="Keycloak authorization request ($test_case)"
     status=$(keycloak_request -o "$directory/login.html" -D "$directory/auth-headers" -w '%{http_code}' -c "$directory/cookies" -G \
         --data-urlencode "client_id=$client" --data-urlencode "redirect_uri=$redirect_uri" \
-        --data 'response_type=code' --data-urlencode 'scope=openid sessions' \
+        --data 'response_type=code' "${requested_scopes[@]}" \
         --data-urlencode "code_challenge@$directory/challenge" --data 'code_challenge_method=S256' \
         "$protocol/auth")
     if [[ "$test_case" == wrong-redirect ]]; then
@@ -303,4 +312,46 @@ keycloak_code() {
             (.aud == $audience or .aud == [$audience]) end)
     ' "$directory/claims.json" >/dev/null
     jq -er '"Authorization: Bearer " + .access_token' "$directory/token.json" > "$scratch/keycloak-$test_case.header"
+}
+
+qualify_shared_client() {
+    local admin_clients=$1 apply="$bundle/keycloak/apply-shared-client.sh"
+    local source="$scratch/shared-import.json" changed="$scratch/shared-changed.json"
+    local loopback callback_https current_id
+    loopback=$(jq -er '.clients[0].redirectUris[0]' "$source")
+    callback_https=$(jq -er '.clients[0].redirectUris[1]' "$source")
+    phase="Keycloak shared realm import"
+    [[ "$(bash "$apply" "$source" "$scratch/admin-token")" == 'Shared OAuth client unchanged.' ]]
+    keycloak_code person-one shared-import shared-loopback "$loopback"
+    keycloak_code person-one shared-import shared-https "$callback_https"
+
+    phase="Keycloak shared client creation and repeat application"
+    jq '.clients[0].id = "shared-created"' "$source" > "$changed"
+    [[ "$(bash "$apply" "$changed" "$scratch/admin-token")" == 'Shared OAuth client registered.' ]]
+    [[ "$(bash "$apply" "$changed" "$scratch/admin-token")" == 'Shared OAuth client unchanged.' ]]
+    keycloak_request --fail -H "@$scratch/keycloak-admin.header" "$admin_clients?clientId=shared-created" |
+        jq -er 'select(length==1) | .[0].id' > "$scratch/shared-id"
+    current_id=$(< "$scratch/shared-id")
+
+    phase="Keycloak compatible callback update"
+    jq --arg callback "$callback_https-next" \
+        '.clients[0] |= (.id="shared-created" | .redirectUris[1]=$callback)' "$source" > "$changed"
+    [[ "$(bash "$apply" "$changed" "$scratch/admin-token")" == 'Shared OAuth client updated.' ]]
+    [[ "$(bash "$apply" "$changed" "$scratch/admin-token")" == 'Shared OAuth client unchanged.' ]]
+    keycloak_request --fail -H "@$scratch/keycloak-admin.header" "$admin_clients?clientId=shared-created" |
+        jq -e --arg id "$current_id" 'length==1 and .[0].id==$id' >/dev/null
+    keycloak_code person-one shared-created wrong-redirect "$callback_https"
+    keycloak_code person-one shared-created shared-upgraded "$callback_https-next"
+
+    phase="Keycloak shared registration conflict and scope protection"
+    jq '.clients[0].id="example-chat-one"' "$source" > "$changed"
+    if bash "$apply" "$changed" "$scratch/admin-token" > "$scratch/conflict.log" 2>&1; then return 1; fi
+    grep -Fq 'existing client conflicts' "$scratch/conflict.log"
+    jq '.resource="https://unrelated.example.test/mcp"' "$source" > "$changed"
+    if bash "$apply" "$changed" "$scratch/admin-token" > "$scratch/conflict.log" 2>&1; then return 1; fi
+    grep -Fq 'scope does not match' "$scratch/conflict.log"
+    jq '.clients[0].redirectUris[1]="https://chat.example.net/*"' "$source" > "$changed"
+    if bash "$apply" "$changed" "$scratch/admin-token" > "$scratch/conflict.log" 2>&1; then return 1; fi
+    grep -Fq 'Invalid static client manifest' "$scratch/conflict.log"
+    cp "$scratch/keycloak-shared-upgraded.header" "$scratch/keycloak-granted.header"
 }

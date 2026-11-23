@@ -30,6 +30,7 @@ case "${1:-}" in
             and (.id | type == "string" and test("\\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\z"))
             and (.redirectUris | type == "array" and length > 0 and length == (unique | length))
             and (if .type == "desktop" then all(.redirectUris[]; loopback)
+                 elif .type == "shared-public" then all(.redirectUris[]; loopback or https_callback)
                  elif .type == "chat-public" or .type == "chat-confidential" then
                      all(.redirectUris[]; https_callback)
                  else false end);
@@ -73,8 +74,8 @@ jq --arg format "$format" '
     implicitFlowEnabled: false,
     serviceAccountsEnabled: false,
     fullScopeAllowed: false,
-    defaultClientScopes: [],
-    optionalClientScopes: ["sessions"],
+    defaultClientScopes: (if .type == "shared-public" then ["sessions"] else [] end),
+    optionalClientScopes: (if .type == "shared-public" then [] else ["sessions"] end),
     attributes: {"pkce.code.challenge.method":"S256"},
     protocolMappers: [{
       name: "Stable local user subject",

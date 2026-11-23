@@ -23,7 +23,7 @@ Set the paths and origins from the extracted release directory.
 Preserve the verified archive's file modes during extraction. If your
 extraction tool applies a restrictive umask, restore mode `0755` on
 `keycloak/init-database.sh` and mode `0644` on `keycloak/start-reference.sh`
-and `keycloak/nginx.conf`. These three public files are mounted into services
+plus `keycloak/nginx.conf` and `keycloak/start-proxy.sh`. These public files are mounted into services
 that run with their own user IDs.
 
 ```sh
@@ -158,6 +158,8 @@ the client sends it. The example uses illustrative client IDs and callbacks.
 - `desktop` uses public OAuth with explicit `http://127.0.0.1:PORT/path`
   callbacks.
 - `chat-public` uses public OAuth with HTTPS callbacks.
+- `shared-public` combines IPv4 loopback and HTTPS callbacks on one public
+  registration. It requires S256 and grants only the default `sessions` scope.
 - `chat-confidential` uses HTTPS callbacks and authenticates the client at
   the token endpoint. Keycloak issues its credential after registration.
 
@@ -173,6 +175,33 @@ umask 077
 private="$KEYCLOAK_CONFIG_DIR"
 bash keycloak/render-realm.sh --manifest "$private/clients.json" > "$private/realm.json"
 ```
+
+### Install or upgrade a shared public client
+
+Copy `keycloak/shared-client.example.json` to an operator-owned private
+directory. Set the actual MCP resource, client ID and verified callback URLs.
+Use file mode `0600`. For an initial realm import, render the realm from this
+manifest or include its shared entry in your combined private client manifest.
+
+For an existing realm, set the HTTPS login origin, private HTTPS admin origin
+and private CA file as described above. Obtain a short-lived admin access token
+authorized to read client scopes and manage clients in the realm. Apply the manifest.
+
+```sh
+bash keycloak/apply-shared-client.sh "$private/shared-client.json" "$private/admin-token"
+```
+
+The script registers a new client or applies the declared callback list to a
+compatible existing public client. Reapplying the same list leaves the existing
+client untouched. A conflicting registration or a mismatched audience requires
+operator review. The manifest callback list is authoritative. Serialize admin
+changes targeting the same client, retain the previous private manifest for
+rollback, and rerun after a lost response to verify the stored registration.
+Other registrations and Hosting user grants are managed independently.
+
+The public proxy publishes both discovery documents with public token exchange
+and S256. Dynamic registration remains unavailable. Upgrade the reference proxy
+from the same release bundle to apply its discovery configuration.
 
 ### Add clients to an existing realm
 

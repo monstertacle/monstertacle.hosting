@@ -37,6 +37,7 @@ enrollment/policy.example.json f
 enrollment/quadlet/hosting-broker.container.d/50-enrollment.conf f
 enrollment/quadlet/hosting-edge.container.d/50-enrollment.conf f
 keycloak/README.md f
+keycloak/apply-shared-client.sh f
 keycloak/bootstrap.compose.yaml f
 keycloak/clients.example.json f
 keycloak/compose.yaml f
@@ -44,6 +45,8 @@ keycloak/enroll-user.sh f
 keycloak/init-database.sh f
 keycloak/nginx.conf f
 keycloak/render-realm.sh f
+keycloak/shared-client.example.json f
+keycloak/start-proxy.sh f
 keycloak/start-reference.sh f
 EOF_FILES
 then
@@ -52,6 +55,7 @@ then
 fi
 [[ "$(stat -c %a keycloak/init-database.sh)" == 755 &&
     "$(stat -c %a keycloak/start-reference.sh)" == 644 &&
+    "$(stat -c %a keycloak/start-proxy.sh)" == 644 &&
     "$(stat -c %a keycloak/nginx.conf)" == 644 ]] || {
     printf 'The Keycloak container mount files have unexpected permissions.\n' >&2
     exit 1

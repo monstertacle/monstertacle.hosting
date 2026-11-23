@@ -45,7 +45,7 @@ cp "$repo/deploy/release/"{README.md,quickstart.sh,fixture-config.sh,fixture-enr
 mkdir -p "$bundle/keycloak" "$bundle/enrollment/quadlet/"{hosting-broker.container.d,hosting-edge.container.d}
 reference_files=(
     enrollment/{README.md,compose.yaml,enroll.sh,policy.example.json}
-    keycloak/{README.md,compose.yaml,bootstrap.compose.yaml,clients.example.json,start-reference.sh,nginx.conf,render-realm.sh,enroll-user.sh}
+    keycloak/{README.md,compose.yaml,bootstrap.compose.yaml,clients.example.json,start-reference.sh,start-proxy.sh,nginx.conf,render-realm.sh,enroll-user.sh,apply-shared-client.sh,shared-client.example.json}
 )
 for role in broker edge; do
     reference_files+=("enrollment/quadlet/hosting-$role.container.d/50-enrollment.conf")
